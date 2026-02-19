@@ -1,6 +1,6 @@
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Tuple, Dict
+from typing import Dict, List, Tuple
 import math
 
 @dataclass
@@ -8,55 +8,55 @@ class ModelOutput:
     top3: List[str]
     top12: List[str]
     debug: Dict
+    best_signal: float
+    best_a11: int
+    ok_alert: bool
+
+def _z2(x: str) -> str:
+    s = str(x).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits.zfill(2) if digits else ""
 
 def _exp_weights(n: int, half_life: float = 30.0) -> List[float]:
-    # pesos exponenciales: más reciente pesa más
-    # w[t] para t=0..n-1 donde t=0 es el más antiguo; al final se normaliza
     lam = math.log(2) / half_life
-    ws = [math.exp(lam * i) for i in range(n)]  # i crece hacia lo reciente
+    ws = [math.exp(lam * i) for i in range(n)]
     s = sum(ws)
     return [w / s for w in ws]
 
 def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120) -> ModelOutput:
-    """
-    draws: lista de tuplas (n1,n2,n3) ordenadas cronológicamente (antiguo -> reciente).
-    """
-    if len(draws) < 30:
-        raise ValueError("Historial insuficiente para rankear (mínimo recomendado 30).")
+    if len(draws) < 50:
+        raise ValueError(f"Historial insuficiente para rankear: {len(draws)} filas (mínimo 50).")
 
     last = draws[-window_n:] if len(draws) >= window_n else draws[:]
     n = len(last)
 
     weights = _exp_weights(n, half_life=30.0)
 
-    # Frecuencia ponderada
     freq = defaultdict(float)
-    # Atraso (distancia desde la última vez vista en ventana completa)
     last_seen = {f"{i:02d}": None for i in range(100)}
 
     for idx, (a,b,c) in enumerate(last):
+        a,b,c = _z2(a), _z2(b), _z2(c)
         for x in (a,b,c):
             freq[x] += weights[idx]
-        for x in (a,b,c):
             last_seen[x] = idx
 
-    # tendencia corta (últimos 20)
     short = last[-20:] if n >= 20 else last
     short_count = defaultdict(int)
     for a,b,c in short:
-        for x in (a,b,c):
+        for x in (_z2(a), _z2(b), _z2(c)):
             short_count[x] += 1
 
-    def atraso_bonus(x: str) -> float:
-        # bonus saturado 0..1
+    def atraso(x: str) -> int:
         if last_seen[x] is None:
-            d = n
-        else:
-            d = (n - 1) - last_seen[x]
+            return n
+        return (n - 1) - last_seen[x]
+
+    def atraso_bonus(x: str) -> float:
+        d = atraso(x)
         lam = 0.12
         return 1.0 - math.exp(-lam * d)
 
-    # score base
     scores = {}
     for i in range(100):
         x = f"{i:02d}"
@@ -71,9 +71,12 @@ def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120
     top12 = ranked[:12]
     top3 = ranked[:3]
 
+    best_signal = float(scores[top12[0]])
+    best_a11 = sum(1 for x in top12 if atraso(x) >= 11)
+
+    # alerta simple: si best_signal supera un umbral fijo mínimo
+    ok_alert = best_signal >= 0.020  # ajustable con tu backtest
+
     debug = {
         "window_used": n,
-        "top_score": scores[top12[0]],
-        "bottom_top12_score": scores[top12[-1]],
-    }
-    return ModelOutput(top3=top3, top12=top12, debug=debug)
+        "top_score_
