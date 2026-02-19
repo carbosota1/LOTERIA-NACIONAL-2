@@ -186,7 +186,8 @@ def run_picks(history: List[Row], fecha: str, slot: str):
     target_sorteo = DRAW_GANAMAS
     title = "Gana Más"
     target_id = draw_id(fecha, target_label)
-        return
+
+    
 
     target_id = draw_id(fecha, target_label)
 
