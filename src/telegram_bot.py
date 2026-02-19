@@ -16,5 +16,5 @@ def get_telegram_creds(token_env="TELEGRAM_BOT_TOKEN", chat_env="TELEGRAM_CHAT_I
     token = os.getenv(token_env, "").strip()
     chat_id = os.getenv(chat_env, "").strip()
     if not token or not chat_id:
-        raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en variables de entorno.")
+        raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en variables de entorno (Secrets).")
     return token, chat_id
