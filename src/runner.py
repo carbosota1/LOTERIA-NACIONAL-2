@@ -1,10 +1,19 @@
+# ========================
+# FILE: src/runner.py
+# ========================
 import argparse
 import csv
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import List, Tuple, Optional
 
-from config import Settings, TZ_RD, DRAW_GANAMAS, DRAW_NOCHE, LABEL_MAP
+from config import (
+    Settings, TZ_RD,
+    DRAW_GANAMAS, DRAW_NOCHE, LABEL_MAP,
+    MID_PUBLISH_HOUR, MID_PUBLISH_MIN,
+    NIGHT_PUBLISH_HOUR, NIGHT_PUBLISH_MIN,
+    PUBLISH_BUFFER_MIN,
+)
 from telegram_bot import get_telegram_creds, send_telegram_message
 from store import append_csv, now_iso_utc
 from ln_history_xlsx import (
@@ -17,6 +26,7 @@ from ln_history_xlsx import (
 from model_ln import rank_numbers_from_draws
 from performance import score_hits
 
+# Tu scraper (sin login)
 from ln_scraper import get_result
 
 
@@ -53,7 +63,42 @@ def _today_ymd() -> str:
     return datetime.now(TZ_RD).date().strftime("%Y-%m-%d")
 
 
+def _ready_by_time(draw_title: str, fecha: str) -> bool:
+    """
+    ✅ Anti-fantasma por horario:
+    - Si fecha != hoy RD -> permitimos (backfill histórico).
+    - Si fecha == hoy RD -> SOLO permitimos si ya pasó hora de publicación + buffer.
+    """
+    today = datetime.now(TZ_RD).date()
+    d = datetime.strptime(fecha, "%Y-%m-%d").date()
+
+    if d != today:
+        return True
+
+    now = datetime.now(TZ_RD)
+    buf = timedelta(minutes=PUBLISH_BUFFER_MIN)
+
+    if draw_title == DRAW_GANAMAS:
+        publish_dt = datetime.combine(today, time(MID_PUBLISH_HOUR, MID_PUBLISH_MIN), tzinfo=TZ_RD) + buf
+        return now >= publish_dt
+
+    if draw_title == DRAW_NOCHE:
+        publish_dt = datetime.combine(today, time(NIGHT_PUBLISH_HOUR, NIGHT_PUBLISH_MIN), tzinfo=TZ_RD) + buf
+        return now >= publish_dt
+
+    return True
+
+
 def try_get_result(draw_title: str, fecha: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Devuelve tuple(n1,n2,n3) o None si:
+      - aún no debe estar publicado (anti-fantasma),
+      - o no está publicado en la web,
+      - o no existe el sorteo en esa fecha.
+    """
+    if not _ready_by_time(draw_title, fecha):
+        return None
+
     try:
         return get_result(draw_title, fecha)
     except ValueError as e:
@@ -108,7 +153,6 @@ def is_phantom_holiday_repeat(history: List[Row], sorteo: str, fecha: str, nums:
     if not prev:
         return False
 
-    # si la fecha previa es justamente el día anterior, y el resultado es idéntico => feriado/repetición
     try:
         prev_d = datetime.strptime(prev.fecha, "%Y-%m-%d").date()
         cur_d = datetime.strptime(fecha, "%Y-%m-%d").date()
@@ -127,8 +171,8 @@ def sync_for_date(s: Settings, fecha: str, history_current: List[Row]) -> List[R
     BLOQUEA:
       - fechas futuras
       - resultados feriado/repetidos (fantasmas)
+      - resultados de HOY antes de hora (anti-fantasma)
     """
-    # bloquear fechas futuras
     today = datetime.now(TZ_RD).date()
     d = datetime.strptime(fecha, "%Y-%m-%d").date()
     if d > today:
@@ -172,7 +216,7 @@ def log_new_draws(new_rows: List[Row]) -> None:
 
 def decide_target_live(fecha: str) -> Tuple[str, str, str, Optional[Tuple[str, str, str]]]:
     """
-    Decide target basado en lo publicado EN VIVO (scraper), no en lo que diga el XLSX.
+    Decide target basado en lo publicado EN VIVO (scraper) + anti-fantasma por horario.
     - Si MID no está publicado: target MID
     - Si MID publicado y NIGHT no: target NIGHT + mid_today
     - Si ambos publicados: DONE
@@ -200,7 +244,7 @@ def run_picks(history: List[Row], fecha: str, slot: str):
 
     target_id = draw_id(fecha, target_label)
 
-    # ✅ no duplicar picks
+    # ✅ no duplicar picks para el mismo sorteo+slot
     if pick_already_logged(target_id, slot):
         return
 
@@ -234,7 +278,6 @@ def run_picks(history: List[Row], fecha: str, slot: str):
         "debug_json": str(out.debug),
         "model_version": "LN-quiniela-v1",
     }
-
     append_csv("data/picks_log.csv", row, PICKS_HEADER)
 
     msg = (
@@ -306,21 +349,17 @@ def main():
     args = ap.parse_args()
 
     s = Settings()
-
-    # ✅ Determinar fecha objetivo
     fecha = safe_date_from_arg(args.date)
 
-    # ✅ 1) SANITIZE primero (quita futuros + feriados repetidos)
-    today_ymd = _today_ymd()
-    sanitize_history_xlsx(s.history_xlsx_path, s.history_sheet_name, today_ymd)
+    # ✅ 1) Sanitizar history primero (quita futuros + feriado repetido consecutivo)
+    sanitize_history_xlsx(s.history_xlsx_path, s.history_sheet_name, _today_ymd())
 
     # cargar history limpio
     history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
 
-    # ✅ 2) SYNC HOY (y en sync también AYER) pero bloqueando fantasmas/feriados
+    # ✅ 2) Sync HOY (y en sync también AYER) bloqueando fantasmas/feriados
     new_today = sync_for_date(s, fecha, history)
     if new_today:
-        # recargar history si hubo cambios
         history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
         log_new_draws(new_today)
 
