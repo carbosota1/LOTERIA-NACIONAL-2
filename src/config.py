@@ -13,9 +13,9 @@ LABEL_MAP = {
 
 @dataclass(frozen=True)
 class Settings:
-    history_xml_path: str = "data/La_nacional_history.xml"
+    history_xlsx_path: str = "data/la_nacional_history.xlsx"
+    history_sheet_name: str = "history"
     window_n: int = 120
 
-    # Telegram (se inyecta por env vars en GH Actions)
     telegram_bot_token_env: str = "TELEGRAM_BOT_TOKEN"
     telegram_chat_id_env: str = "TELEGRAM_CHAT_ID"
