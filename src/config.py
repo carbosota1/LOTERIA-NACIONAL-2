@@ -16,11 +16,11 @@ LABEL_MAP = {
 
 # ✅ Anti-fantasma por horario (RD)
 # Ajusta estas horas si tu operación oficial es distinta.
-MID_PUBLISH_HOUR = 13    # 1:00 PM RD
-MID_PUBLISH_MIN  = 0
+MID_PUBLISH_HOUR = 14    # 2:40 PM RD
+MID_PUBLISH_MIN  = 40
 
-NIGHT_PUBLISH_HOUR = 21  # 9:00 PM RD
-NIGHT_PUBLISH_MIN  = 0
+NIGHT_PUBLISH_HOUR = 21  # 9:15 PM RD
+NIGHT_PUBLISH_MIN  = 15
 
 PUBLISH_BUFFER_MIN = 8   # buffer de publicación del site (minutos)
 
