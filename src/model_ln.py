@@ -23,7 +23,11 @@ def _exp_weights(n: int, half_life: float = 30.0) -> List[float]:
     s = sum(ws)
     return [w / s for w in ws]
 
-def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120) -> ModelOutput:
+def rank_numbers_from_draws(draws: List[Tuple[str, str, str]], window_n: int = 120) -> ModelOutput:
+    """
+    draws: lista (n1,n2,n3) en orden cronológico (antiguo -> reciente)
+    retorna ModelOutput (nunca None)
+    """
     if len(draws) < 50:
         raise ValueError(f"Historial insuficiente para rankear: {len(draws)} filas (mínimo 50).")
 
@@ -35,15 +39,15 @@ def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120
     freq = defaultdict(float)
     last_seen = {f"{i:02d}": None for i in range(100)}
 
-    for idx, (a,b,c) in enumerate(last):
-        a,b,c = _z2(a), _z2(b), _z2(c)
-        for x in (a,b,c):
+    for idx, (a, b, c) in enumerate(last):
+        a, b, c = _z2(a), _z2(b), _z2(c)
+        for x in (a, b, c):
             freq[x] += weights[idx]
             last_seen[x] = idx
 
     short = last[-20:] if n >= 20 else last
     short_count = defaultdict(int)
-    for a,b,c in short:
+    for a, b, c in short:
         for x in (_z2(a), _z2(b), _z2(c)):
             short_count[x] += 1
 
@@ -57,13 +61,15 @@ def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120
         lam = 0.12
         return 1.0 - math.exp(-lam * d)
 
-    scores = {}
+    scores: Dict[str, float] = {}
+    denom_short = max(1, len(short) * 3)
+
     for i in range(100):
         x = f"{i:02d}"
         s = (
             0.60 * freq.get(x, 0.0) +
             0.25 * atraso_bonus(x) +
-            0.15 * (short_count.get(x, 0) / max(1, len(short)*3))
+            0.15 * (short_count.get(x, 0) / denom_short)
         )
         scores[x] = s
 
@@ -74,12 +80,20 @@ def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120
     best_signal = float(scores[top12[0]])
     best_a11 = sum(1 for x in top12 if atraso(x) >= 11)
 
-    # alerta simple: si best_signal supera un umbral fijo mínimo
-    ok_alert = best_signal >= 0.020  # ajustable con tu backtest
+    ok_alert = best_signal >= 0.020  # ajustable
 
     debug = {
-    "window_used": n,
-    "top_score": best_signal,
-    "top12_bottom_score": float(scores[top12[-1]]),
-    "best_a11": best_a11,
-}
+        "window_used": n,
+        "top_score": best_signal,
+        "top12_bottom_score": float(scores[top12[-1]]),
+        "best_a11": best_a11,
+    }
+
+    return ModelOutput(
+        top3=top3,
+        top12=top12,
+        debug=debug,
+        best_signal=best_signal,
+        best_a11=best_a11,
+        ok_alert=ok_alert,
+    )
