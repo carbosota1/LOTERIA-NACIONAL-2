@@ -1,4 +1,4 @@
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 def score_hits(top3: List[str], top12: List[str], observed: Tuple[str,str,str]) -> Dict:
     obs = list(observed)
