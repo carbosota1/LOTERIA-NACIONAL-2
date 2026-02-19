@@ -7,11 +7,16 @@ from typing import List, Tuple, Optional
 from config import Settings, TZ_RD, DRAW_GANAMAS, DRAW_NOCHE, LABEL_MAP
 from telegram_bot import get_telegram_creds, send_telegram_message
 from store import append_csv, now_iso_utc
-from ln_history_xlsx import read_history_xlsx, upsert_rows_xlsx, Row
+from ln_history_xlsx import (
+    read_history_xlsx,
+    upsert_rows_xlsx,
+    sanitize_history_xlsx,
+    latest_before,
+    Row,
+)
 from model_ln import rank_numbers_from_draws
 from performance import score_hits
 
-# Tu scraper aquí:
 from ln_scraper import get_result
 
 
@@ -22,9 +27,7 @@ PICKS_HEADER = [
     "same_day_mid_present", "mid_today_nums",
     "debug_json", "model_version"
 ]
-
 DRAWS_HEADER = ["draw_id", "fecha", "label", "n1", "n2", "n3", "fetched_at", "source"]
-
 PERF_HEADER = [
     "draw_id", "picked_from_ts_run",
     "top3", "top12",
@@ -39,21 +42,18 @@ def draw_id(fecha: str, label: str) -> str:
 
 
 def safe_date_from_arg(date_str: str) -> str:
-    """
-    Si viene vacío, usa hoy RD. Si viene 'YYYY-MM-DD', lo valida.
-    """
     date_str = (date_str or "").strip()
     if not date_str:
         return datetime.now(TZ_RD).date().strftime("%Y-%m-%d")
-    # valida formato
     datetime.strptime(date_str, "%Y-%m-%d")
     return date_str
 
 
+def _today_ymd() -> str:
+    return datetime.now(TZ_RD).date().strftime("%Y-%m-%d")
+
+
 def try_get_result(draw_title: str, fecha: str) -> Optional[Tuple[str, str, str]]:
-    """
-    Devuelve tuple(n1,n2,n3) o None si aún no está publicado/no existe ese sorteo en esa fecha.
-    """
     try:
         return get_result(draw_title, fecha)
     except ValueError as e:
@@ -65,31 +65,7 @@ def try_get_result(draw_title: str, fecha: str) -> Optional[Tuple[str, str, str]
         raise
 
 
-def sync_for_date(s: Settings, fecha: str) -> List[Row]:
-    """
-    Ejecuta scraper para MID/NIGHT en una fecha, y upsert en XLSX master.
-    Retorna filas nuevas encontradas (publicadas).
-    """
-    new_rows: List[Row] = []
-
-    mid = try_get_result(DRAW_GANAMAS, fecha)
-    if mid:
-        new_rows.append(Row(fecha, DRAW_GANAMAS, mid[0], mid[1], mid[2]))
-
-    night = try_get_result(DRAW_NOCHE, fecha)
-    if night:
-        new_rows.append(Row(fecha, DRAW_NOCHE, night[0], night[1], night[2]))
-
-    if new_rows:
-        upsert_rows_xlsx(s.history_xlsx_path, s.history_sheet_name, new_rows)
-
-    return new_rows
-
-
 def csv_has_row(path: str, match: dict) -> bool:
-    """
-    Revisa si existe una fila en CSV donde todas las keys de match coincidan.
-    """
     if not os.path.exists(path):
         return False
     with open(path, "r", encoding="utf-8") as f:
@@ -106,9 +82,6 @@ def csv_has_row(path: str, match: dict) -> bool:
 
 
 def pick_already_logged(target_draw_id: str, schedule_slot: str) -> bool:
-    """
-    ✅ Dedup picks: si ya existe un pick para ese sorteo (target_draw_id) y ese slot, no lo repetimos.
-    """
     return csv_has_row("data/picks_log.csv", {
         "target_draw_id": target_draw_id,
         "schedule_slot": schedule_slot,
@@ -116,40 +89,65 @@ def pick_already_logged(target_draw_id: str, schedule_slot: str) -> bool:
 
 
 def draw_already_logged(draw_id_value: str) -> bool:
-    """
-    ✅ Dedup draws: si ya existe ese draw_id en draws_log.csv, no lo repetimos.
-    """
-    return csv_has_row("data/draws_log.csv", {
-        "draw_id": draw_id_value,
-    })
+    return csv_has_row("data/draws_log.csv", {"draw_id": draw_id_value})
 
 
 def perf_already_logged(draw_id_value: str, picked_from_ts_run: str) -> bool:
-    """
-    ✅ Dedup performance: si ya existe (draw_id, picked_from_ts_run), no lo repetimos.
-    """
     return csv_has_row("data/performance_log.csv", {
         "draw_id": draw_id_value,
         "picked_from_ts_run": picked_from_ts_run,
     })
 
 
-def decide_target_for_today(history: List[Row], fecha: str) -> Tuple[str, str, str, Optional[Tuple[str, str, str]]]:
+def is_phantom_holiday_repeat(history: List[Row], sorteo: str, fecha: str, nums: Tuple[str, str, str]) -> bool:
     """
-    Retorna (target_label, target_sorteo, title, mid_today_tuple_or_none)
-    target_label: MID / NIGHT / DONE
+    Si el resultado de 'fecha' es EXACTAMENTE igual al último día anterior (normalmente ayer),
+    lo tratamos como feriado/repetición fantasma y NO lo guardamos.
     """
-    mid_row = next((r for r in history if r.fecha == fecha and r.sorteo == DRAW_GANAMAS), None)
-    night_row = next((r for r in history if r.fecha == fecha and r.sorteo == DRAW_NOCHE), None)
+    prev = latest_before(history, sorteo, fecha)
+    if not prev:
+        return False
 
-    mid_today = (mid_row.primero, mid_row.segundo, mid_row.tercero) if mid_row else None
-    night_today = (night_row.primero, night_row.segundo, night_row.tercero) if night_row else None
+    # si la fecha previa es justamente el día anterior, y el resultado es idéntico => feriado/repetición
+    try:
+        prev_d = datetime.strptime(prev.fecha, "%Y-%m-%d").date()
+        cur_d = datetime.strptime(fecha, "%Y-%m-%d").date()
+    except Exception:
+        return False
 
-    if mid_today is None:
-        return ("MID", DRAW_GANAMAS, "Gana Más", mid_today)
-    if night_today is None:
-        return ("NIGHT", DRAW_NOCHE, "Noche", mid_today)
-    return ("DONE", "", "DONE", mid_today)
+    if (cur_d - prev_d).days == 1 and (prev.primero, prev.segundo, prev.tercero) == nums:
+        return True
+
+    return False
+
+
+def sync_for_date(s: Settings, fecha: str, history_current: List[Row]) -> List[Row]:
+    """
+    Ejecuta scraper para MID/NIGHT en una fecha y upsert en XLSX master.
+    BLOQUEA:
+      - fechas futuras
+      - resultados feriado/repetidos (fantasmas)
+    """
+    # bloquear fechas futuras
+    today = datetime.now(TZ_RD).date()
+    d = datetime.strptime(fecha, "%Y-%m-%d").date()
+    if d > today:
+        return []
+
+    new_rows: List[Row] = []
+
+    mid = try_get_result(DRAW_GANAMAS, fecha)
+    if mid and not is_phantom_holiday_repeat(history_current, DRAW_GANAMAS, fecha, mid):
+        new_rows.append(Row(fecha, DRAW_GANAMAS, mid[0], mid[1], mid[2]))
+
+    night = try_get_result(DRAW_NOCHE, fecha)
+    if night and not is_phantom_holiday_repeat(history_current, DRAW_NOCHE, fecha, night):
+        new_rows.append(Row(fecha, DRAW_NOCHE, night[0], night[1], night[2]))
+
+    if new_rows:
+        upsert_rows_xlsx(s.history_xlsx_path, s.history_sheet_name, new_rows)
+
+    return new_rows
 
 
 def log_new_draws(new_rows: List[Row]) -> None:
@@ -172,41 +170,50 @@ def log_new_draws(new_rows: List[Row]) -> None:
         }, DRAWS_HEADER)
 
 
+def decide_target_live(fecha: str) -> Tuple[str, str, str, Optional[Tuple[str, str, str]]]:
+    """
+    Decide target basado en lo publicado EN VIVO (scraper), no en lo que diga el XLSX.
+    - Si MID no está publicado: target MID
+    - Si MID publicado y NIGHT no: target NIGHT + mid_today
+    - Si ambos publicados: DONE
+    """
+    mid_live = try_get_result(DRAW_GANAMAS, fecha)
+    if mid_live is None:
+        return ("MID", DRAW_GANAMAS, "Gana Más", None)
+
+    night_live = try_get_result(DRAW_NOCHE, fecha)
+    if night_live is None:
+        return ("NIGHT", DRAW_NOCHE, "Noche", mid_live)
+
+    return ("DONE", "", "DONE", mid_live)
+
+
 def run_picks(history: List[Row], fecha: str, slot: str):
     s = Settings()
     token, chat_id = get_telegram_creds(s.telegram_bot_token_env, s.telegram_chat_id_env)
 
-    target_label, target_sorteo, title, mid_today = decide_target_for_today(history, fecha)
+    target_label, target_sorteo, title, mid_today = decide_target_live(fecha)
 
-
-    if  target_label == "DONE":
-        # Si hoy ya terminó, apuntamos al próximo sorteo (mañana MID)
-        dt_next = datetime.strptime(fecha, "%Y-%m-%d").date() + timedelta(days=1)
-        fecha = dt_next.strftime("%Y-%m-%d")
-
-        target_label = "MID" 
-        target_sorteo = DRAW_GANAMAS
-        title = "Gana Más"
-
-        target_id = draw_id(fecha, target_label)
-
-    
+    if target_label == "DONE":
+        send_telegram_message(f"✅ LN: Ya salieron Gana Más y Noche hoy ({fecha}). NO_EVENT.", token, chat_id)
+        return
 
     target_id = draw_id(fecha, target_label)
 
-    # ✅ NO duplicar picks para el mismo sorteo+slot
+    # ✅ no duplicar picks
     if pick_already_logged(target_id, slot):
-        # No spameamos Telegram. Si quieres aviso, descomenta:
-        # send_telegram_message(f"ℹ️ LN: Picks ya registrados para {target_id} (slot {slot}).", token, chat_id)
         return
 
-    # Entrenamiento separado por sorteo (más estable)
     draws: List[Tuple[str, str, str]] = [(r.primero, r.segundo, r.tercero) for r in history if r.sorteo == target_sorteo]
     if len(draws) < 50:
         send_telegram_message(f"⚠️ LN {title}: historial insuficiente ({len(draws)} filas).", token, chat_id)
         return
 
-    out = rank_numbers_from_draws(draws, window_n=s.window_n)
+    try:
+        out = rank_numbers_from_draws(draws, window_n=s.window_n)
+    except Exception as e:
+        send_telegram_message(f"⚠️ LN {title}: error modelo: {e}", token, chat_id)
+        return
 
     same_day_mid_present = mid_today is not None
     mid_today_nums = ",".join(mid_today) if mid_today else ""
@@ -247,7 +254,6 @@ def run_performance(history: List[Row]):
     if not os.path.exists(picks_path):
         return
 
-    # index resultados por draw_id
     results = {}
     for r in history:
         label = LABEL_MAP.get(r.sorteo, "")
@@ -266,7 +272,6 @@ def run_performance(history: List[Row]):
         if did not in results:
             continue
 
-        # ✅ Dedup performance
         if perf_already_logged(did, ts_run):
             continue
 
@@ -301,23 +306,30 @@ def main():
     args = ap.parse_args()
 
     s = Settings()
+
+    # ✅ Determinar fecha objetivo
     fecha = safe_date_from_arg(args.date)
 
-    # ✅ Preflight: siempre sync HOY
-    new_today = sync_for_date(s, fecha)
-    log_new_draws(new_today)
+    # ✅ 1) SANITIZE primero (quita futuros + feriados repetidos)
+    today_ymd = _today_ymd()
+    sanitize_history_xlsx(s.history_xlsx_path, s.history_sheet_name, today_ymd)
 
-    # ✅ En sync, también intentamos AYER (cubre retrasos de publicación)
-    if args.mode == "sync":
-        ayer = (datetime.strptime(fecha, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
-        new_yesterday = sync_for_date(s, ayer)
-        log_new_draws(new_yesterday)
-
-    # cargar history actualizado
+    # cargar history limpio
     history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
 
-    # modos
+    # ✅ 2) SYNC HOY (y en sync también AYER) pero bloqueando fantasmas/feriados
+    new_today = sync_for_date(s, fecha, history)
+    if new_today:
+        # recargar history si hubo cambios
+        history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
+        log_new_draws(new_today)
+
     if args.mode == "sync":
+        ayer = (datetime.strptime(fecha, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
+        new_y = sync_for_date(s, ayer, history)
+        if new_y:
+            history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
+            log_new_draws(new_y)
         run_performance(history)
         return
 
