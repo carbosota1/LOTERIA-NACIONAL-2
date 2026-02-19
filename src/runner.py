@@ -178,14 +178,17 @@ def run_picks(history: List[Row], fecha: str, slot: str):
 
     target_label, target_sorteo, title, mid_today = decide_target_for_today(history, fecha)
 
-    if target_label == "DONE":
-    # Si hoy ya terminó, apuntamos al próximo sorteo: mañana MID (Gana Más)
-    dt = datetime.strptime(fecha, "%Y-%m-%d").date() + timedelta(days=1)
-    fecha = dt.strftime("%Y-%m-%d")
-    target_label = "MID"
-    target_sorteo = DRAW_GANAMAS
-    title = "Gana Más"
-    target_id = draw_id(fecha, target_label)
+
+    if  target_label == "DONE":
+        # Si hoy ya terminó, apuntamos al próximo sorteo (mañana MID)
+        dt_next = datetime.strptime(fecha, "%Y-%m-%d").date() + timedelta(days=1)
+        fecha = dt_next.strftime("%Y-%m-%d")
+
+        target_label = "MID" 
+        target_sorteo = DRAW_GANAMAS
+        title = "Gana Más"
+
+        target_id = draw_id(fecha, target_label)
 
     
 
