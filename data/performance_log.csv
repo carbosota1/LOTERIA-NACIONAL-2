@@ -1,0 +1,2 @@
+draw_id,picked_from_ts_run,top3,top12,observed_n1,observed_n2,observed_n3,hits_top3_count,hits_top12_count,hit_any_top3,hit_any_top12,hit_positions_top12,best_signal,best_a11,ok_alert,source_rows_hist_used
+LN|2026-02-19|MID,2026-02-19T05:16:14Z,"06,82,52","06,82,52,42,77,78,18,83,88,97,20,91",31,30,04,0,0,0,0,,0.27228028870006005,12,1,120
