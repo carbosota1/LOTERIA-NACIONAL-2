@@ -5,7 +5,7 @@ on:
     - cron: "0 17 * * *"   # 1PM RD -> PICKS
     - cron: "0 19 * * *"   # 3PM RD -> CHECK
     - cron: "0 20 * * *"   # 4PM RD -> PICKS
-    - cron: "0 2 * * *"    # 10PM RD -> SYNC (02:00 UTC)
+    - cron: "0 2 * * *"    # 10PM RD -> SYNC
   workflow_dispatch:
 
 jobs:
@@ -51,10 +51,10 @@ jobs:
         run: |
           python src/runner.py --mode "${{ steps.decide.outputs.mode }}" --slot "${{ steps.decide.outputs.slot }}"
 
-      - name: Commit logs
+      - name: Commit updates (history + logs)
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add data/*.csv data/*.xml data/state.json || true
-          git commit -m "LN logs update" || echo "No changes"
+          git add data/*.xlsx data/*.csv || true
+          git commit -m "LN update (history/logs)" || echo "No changes"
           git push
