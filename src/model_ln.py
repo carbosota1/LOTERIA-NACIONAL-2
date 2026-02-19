@@ -78,5 +78,8 @@ def rank_numbers_from_draws(draws: List[Tuple[str,str,str]], window_n: int = 120
     ok_alert = best_signal >= 0.020  # ajustable con tu backtest
 
     debug = {
-        "window_used": n,
-        "top_score_
+    "window_used": n,
+    "top_score": best_signal,
+    "top12_bottom_score": float(scores[top12[-1]]),
+    "best_a11": best_a11,
+}
