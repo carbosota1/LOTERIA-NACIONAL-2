@@ -1,3 +1,6 @@
+# ========================
+# FILE: src/config.py
+# ========================
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
@@ -10,6 +13,16 @@ LABEL_MAP = {
     DRAW_GANAMAS: "MID",
     DRAW_NOCHE: "NIGHT",
 }
+
+# ✅ Anti-fantasma por horario (RD)
+# Ajusta estas horas si tu operación oficial es distinta.
+MID_PUBLISH_HOUR = 13    # 1:00 PM RD
+MID_PUBLISH_MIN  = 0
+
+NIGHT_PUBLISH_HOUR = 21  # 9:00 PM RD
+NIGHT_PUBLISH_MIN  = 0
+
+PUBLISH_BUFFER_MIN = 8   # buffer de publicación del site (minutos)
 
 @dataclass(frozen=True)
 class Settings:
