@@ -1,0 +1,2 @@
+ts_run,schedule_slot,target_draw_id,window_n,top3,top12,best_signal,best_a11,ok_alert,source_rows_hist_used,same_day_mid_present,mid_today_nums,debug_json,model_version
+2026-02-19T05:16:14Z,manual,LN|2026-02-19|MID,120,"06,82,52","06,82,52,42,77,78,18,83,88,97,20,91",0.27228028870006005,12,1,120,0,,"{'window_used': 120, 'top_score': 0.27228028870006005, 'top12_bottom_score': 0.2620903378029984, 'best_a11': 12}",LN-quiniela-v1
