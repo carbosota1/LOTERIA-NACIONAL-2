@@ -1,0 +1,60 @@
+name: LN System
+
+on:
+  schedule:
+    - cron: "0 17 * * *"   # 1PM RD -> PICKS
+    - cron: "0 19 * * *"   # 3PM RD -> CHECK
+    - cron: "0 20 * * *"   # 4PM RD -> PICKS
+    - cron: "0 2 * * *"    # 10PM RD -> SYNC (02:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+
+      - name: Decide job
+        id: decide
+        run: |
+          S="${{ github.event.schedule }}"
+          echo "schedule=$S"
+          if [ "$S" = "0 17 * * *" ]; then
+            echo "mode=picks" >> $GITHUB_OUTPUT
+            echo "slot=13:00" >> $GITHUB_OUTPUT
+          elif [ "$S" = "0 19 * * *" ]; then
+            echo "mode=check" >> $GITHUB_OUTPUT
+            echo "slot=15:00" >> $GITHUB_OUTPUT
+          elif [ "$S" = "0 20 * * *" ]; then
+            echo "mode=picks" >> $GITHUB_OUTPUT
+            echo "slot=16:00" >> $GITHUB_OUTPUT
+          elif [ "$S" = "0 2 * * *" ]; then
+            echo "mode=sync" >> $GITHUB_OUTPUT
+            echo "slot=22:00" >> $GITHUB_OUTPUT
+          else
+            echo "mode=sync" >> $GITHUB_OUTPUT
+            echo "slot=manual" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python src/runner.py --mode "${{ steps.decide.outputs.mode }}" --slot "${{ steps.decide.outputs.slot }}"
+
+      - name: Commit logs
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add data/*.csv data/*.xml data/state.json || true
+          git commit -m "LN logs update" || echo "No changes"
+          git push
