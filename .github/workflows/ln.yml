@@ -5,8 +5,21 @@ on:
     - cron: "0 17 * * *"   # 1PM RD -> PICKS
     - cron: "0 19 * * *"   # 3PM RD -> CHECK
     - cron: "0 20 * * *"   # 4PM RD -> PICKS
-    - cron: "0 2 * * *"    # 10PM RD -> SYNC
+    - cron: "0 2 * * *"    # 10PM RD -> SYNC (02:00 UTC)
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode: picks | check | sync"
+        required: true
+        default: "picks"
+      slot:
+        description: "Slot label: 13:00 | 15:00 | 16:00 | 22:00 | manual"
+        required: true
+        default: "manual"
+      date:
+        description: "Optional date YYYY-MM-DD (leave empty for today RD)"
+        required: false
+        default: ""
 
 jobs:
   run:
@@ -24,24 +37,38 @@ jobs:
 
       - name: Decide job
         id: decide
+        shell: bash
         run: |
           S="${{ github.event.schedule }}"
           echo "schedule=$S"
-          if [ "$S" = "0 17 * * *" ]; then
-            echo "mode=picks" >> $GITHUB_OUTPUT
-            echo "slot=13:00" >> $GITHUB_OUTPUT
-          elif [ "$S" = "0 19 * * *" ]; then
-            echo "mode=check" >> $GITHUB_OUTPUT
-            echo "slot=15:00" >> $GITHUB_OUTPUT
-          elif [ "$S" = "0 20 * * *" ]; then
-            echo "mode=picks" >> $GITHUB_OUTPUT
-            echo "slot=16:00" >> $GITHUB_OUTPUT
-          elif [ "$S" = "0 2 * * *" ]; then
-            echo "mode=sync" >> $GITHUB_OUTPUT
-            echo "slot=22:00" >> $GITHUB_OUTPUT
+
+          if [ -n "$S" ]; then
+            if [ "$S" = "0 17 * * *" ]; then
+              echo "mode=picks" >> $GITHUB_OUTPUT
+              echo "slot=13:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            elif [ "$S" = "0 19 * * *" ]; then
+              echo "mode=check" >> $GITHUB_OUTPUT
+              echo "slot=15:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            elif [ "$S" = "0 20 * * *" ]; then
+              echo "mode=picks" >> $GITHUB_OUTPUT
+              echo "slot=16:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            elif [ "$S" = "0 2 * * *" ]; then
+              echo "mode=sync" >> $GITHUB_OUTPUT
+              echo "slot=22:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            else
+              echo "mode=sync" >> $GITHUB_OUTPUT
+              echo "slot=manual" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "mode=sync" >> $GITHUB_OUTPUT
-            echo "slot=manual" >> $GITHUB_OUTPUT
+            # Manual run (workflow_dispatch): use inputs
+            echo "mode=${{ inputs.mode }}" >> $GITHUB_OUTPUT
+            echo "slot=${{ inputs.slot }}" >> $GITHUB_OUTPUT
+            echo "date=${{ inputs.date }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Run
@@ -49,7 +76,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python src/runner.py --mode "${{ steps.decide.outputs.mode }}" --slot "${{ steps.decide.outputs.slot }}"
+          python src/runner.py --mode "${{ steps.decide.outputs.mode }}" --slot "${{ steps.decide.outputs.slot }}" --date "${{ steps.decide.outputs.date }}"
 
       - name: Commit updates (history + logs)
         run: |
