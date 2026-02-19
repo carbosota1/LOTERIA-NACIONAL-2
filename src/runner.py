@@ -1,23 +1,25 @@
 import argparse
-from datetime import datetime, date as dt_date, timedelta
-from zoneinfo import ZoneInfo
+import csv
+import os
+from datetime import datetime, timedelta
+from typing import List, Tuple
 
-from config import Settings, TZ_RD, DRAW_GANAMAS, DRAW_NOCHE
+from config import Settings, TZ_RD, DRAW_GANAMAS, DRAW_NOCHE, LABEL_MAP
 from telegram_bot import get_telegram_creds, send_telegram_message
-from store import append_csv, load_state, save_state, now_iso
-from ln_history_xml import read_history_xml, write_history_xml, merge_rows, DrawRow
+from store import append_csv, now_iso_utc
+from ln_history_xlsx import read_history_xlsx, upsert_rows_xlsx, Row
 from model_ln import rank_numbers_from_draws
 from performance import score_hits
 
-# Tu scraper: pégalo en src/ln_scraper.py y se importa aquí
-from ln_scraper import get_result  # tu función actual
+# Tu scraper aquí:
+from ln_scraper import get_result
 
 PICKS_HEADER = [
     "ts_run","schedule_slot","target_draw_id","window_n",
     "top3","top12",
     "best_signal","best_a11","ok_alert","source_rows_hist_used",
     "same_day_mid_present","mid_today_nums",
-    "model_version","debug_json"
+    "debug_json","model_version"
 ]
 DRAWS_HEADER = ["draw_id","fecha","label","n1","n2","n3","fetched_at","source"]
 PERF_HEADER = [
@@ -38,65 +40,50 @@ def try_get_result(draw_title: str, fecha: str):
         msg = str(e).lower()
         if "aún no publicado" in msg or "resultado aún no publicado" in msg:
             return None
-        # si no encontró el sorteo en la página también puede pasar en días raros
         if "no encontré el sorteo" in msg:
             return None
         raise
 
-def sync_day(history_xml_path: str, fecha: str) -> list[DrawRow]:
-    # trae resultados disponibles (MID/NIGHT) y devuelve filas nuevas
-    new_rows = []
+def sync_for_date(s: Settings, fecha: str) -> List[Row]:
+    new_rows: List[Row] = []
     mid = try_get_result(DRAW_GANAMAS, fecha)
     if mid:
-        new_rows.append(DrawRow(fecha, DRAW_GANAMAS, mid[0], mid[1], mid[2]))
-
+        new_rows.append(Row(fecha, DRAW_GANAMAS, mid[0], mid[1], mid[2]))
     night = try_get_result(DRAW_NOCHE, fecha)
     if night:
-        new_rows.append(DrawRow(fecha, DRAW_NOCHE, night[0], night[1], night[2]))
-
+        new_rows.append(Row(fecha, DRAW_NOCHE, night[0], night[1], night[2]))
+    if new_rows:
+        upsert_rows_xlsx(s.history_xlsx_path, s.history_sheet_name, new_rows)
     return new_rows
-
-def pick_target_label(rows_today):
-    # rows_today: dict label -> observed tuple
-    if rows_today.get("MID") is None:
-        return "MID"
-    if rows_today.get("NIGHT") is None:
-        return "NIGHT"
-    return "DONE"
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["picks","check","sync"], required=True)
     ap.add_argument("--slot", default="")
-    ap.add_argument("--date", default="")  # opcional YYYY-MM-DD para backfills
+    ap.add_argument("--date", default="")  # opcional YYYY-MM-DD
     args = ap.parse_args()
 
     s = Settings()
-    state_path = "data/state.json"
+    fecha = args.date.strip()
+    if not fecha:
+        fecha = datetime.now(TZ_RD).date().strftime("%Y-%m-%d")
 
-    today = datetime.now(TZ_RD).date()
-    fecha = args.date.strip() or today.strftime("%Y-%m-%d")
+    # 1) SYNC preflight siempre
+    new_today = sync_for_date(s, fecha)
 
-    # 1) Siempre cargamos history
-    existing = read_history_xml(s.history_xml_path)
-
-    # 2) En picks/check/sync hacemos sync de HOY (y en sync también AYER por seguridad)
-    new_rows = []
-    new_rows += sync_day(s.history_xml_path, fecha)
-
+    # En sync, también intenta ayer para cubrir retrasos de publicación
     if args.mode == "sync":
         ayer = (datetime.strptime(fecha, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
-        new_rows += sync_day(s.history_xml_path, ayer)
+        _ = sync_for_date(s, ayer)
 
-    if new_rows:
-        merged = merge_rows(existing, new_rows)
-        # guardamos en XML normalizado (si quieres preservar tu formato exacto, lo ajusto)
-        write_history_xml(s.history_xml_path, merged)
-        existing = merged
+    # cargar history (ya actualizado)
+    history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
 
-    # Export mínimo a draws_log.csv (solo lo nuevo)
-    for r in new_rows:
-        label = "MID" if r.sorteo == DRAW_GANAMAS else "NIGHT"
+    # log de resultados nuevos en draws_log
+    for r in new_today:
+        label = LABEL_MAP.get(r.sorteo, "")
+        if not label:
+            continue
         append_csv("data/draws_log.csv", {
             "draw_id": draw_id(r.fecha, label),
             "fecha": r.fecha,
@@ -104,121 +91,105 @@ def main():
             "n1": r.primero,
             "n2": r.segundo,
             "n3": r.tercero,
-            "fetched_at": now_iso(),
+            "fetched_at": now_iso_utc(),
             "source": "loteriadominicana.com.do"
         }, DRAWS_HEADER)
 
     if args.mode == "sync":
-        # cierre diario: además intenta calcular performance de todo lo que ya tenga resultado
-        run_performance(existing)
+        run_performance(history)
         return
 
     if args.mode == "check":
-        run_performance(existing)
+        run_performance(history)
         return
 
     if args.mode == "picks":
-        run_picks(existing, args.slot, fecha)
+        run_picks(history, fecha, args.slot)
         return
 
-def run_picks(history_rows, slot: str, fecha: str):
+def run_picks(history: List[Row], fecha: str, slot: str):
     s = Settings()
     token, chat_id = get_telegram_creds(s.telegram_bot_token_env, s.telegram_chat_id_env)
 
     # detectar qué salió hoy
-    mid_row = next((r for r in history_rows if r.fecha == fecha and r.sorteo == DRAW_GANAMAS), None)
-    night_row = next((r for r in history_rows if r.fecha == fecha and r.sorteo == DRAW_NOCHE), None)
+    mid_row = next((r for r in history if r.fecha == fecha and r.sorteo == DRAW_GANAMAS), None)
+    night_row = next((r for r in history if r.fecha == fecha and r.sorteo == DRAW_NOCHE), None)
 
-    rows_today = {
-        "MID": (mid_row.primero, mid_row.segundo, mid_row.tercero) if mid_row else None,
-        "NIGHT": (night_row.primero, night_row.segundo, night_row.tercero) if night_row else None,
-    }
+    mid_today = (mid_row.primero, mid_row.segundo, mid_row.tercero) if mid_row else None
+    night_today = (night_row.primero, night_row.segundo, night_row.tercero) if night_row else None
 
-    target = pick_target_label(rows_today)
-    if target == "DONE":
-        send_telegram_message(f"✅ LN: Ya salieron MID y NIGHT hoy ({fecha}). NO_EVENT.", token, chat_id)
+    if mid_today is None:
+        target_label = "MID"
+        target_sorteo = DRAW_GANAMAS
+        title = "Gana Más"
+    elif night_today is None:
+        target_label = "NIGHT"
+        target_sorteo = DRAW_NOCHE
+        title = "Noche"
+    else:
+        send_telegram_message(f"✅ LN: Ya salieron Gana Más y Noche hoy ({fecha}). NO_EVENT.", token, chat_id)
         return
 
-    target_draw_id = f"LN|{fecha}|{target}"
-
-    # armar lista cronológica de draws SOLO del sorteo target (MID o NIGHT) o ambos?
-    # Para quiniela, lo más coherente es entrenar por label (MID con MID, NIGHT con NIGHT).
-    target_sorteo = DRAW_GANAMAS if target == "MID" else DRAW_NOCHE
-    draws = [(r.primero, r.segundo, r.tercero) for r in history_rows if r.sorteo == target_sorteo]
-    if len(draws) < 50:
-        send_telegram_message(f"⚠️ LN {target}: historial insuficiente ({len(draws)} filas).", token, chat_id)
-        return
-
+    # dataset: entrenar separado por sorteo (estable)
+    draws: List[Tuple[str,str,str]] = [(r.primero, r.segundo, r.tercero) for r in history if r.sorteo == target_sorteo]
     out = rank_numbers_from_draws(draws, window_n=s.window_n)
 
-    # Señales placeholders (si tú ya tienes fórmula best_signal/a11, aquí se conecta)
-    best_signal = 0.0
-    best_a11 = 0
-    ok_alert = False
-    source_rows = min(len(draws), s.window_n)
-
-    same_day_mid_present = (rows_today["MID"] is not None)
-    mid_today_nums = ",".join(rows_today["MID"]) if rows_today["MID"] else ""
+    same_day_mid_present = mid_today is not None
+    mid_today_nums = ",".join(mid_today) if mid_today else ""
 
     row = {
-        "ts_run": now_iso(),
+        "ts_run": now_iso_utc(),
         "schedule_slot": slot,
-        "target_draw_id": target_draw_id,
+        "target_draw_id": draw_id(fecha, target_label),
         "window_n": s.window_n,
         "top3": ",".join(out.top3),
         "top12": ",".join(out.top12),
-        "best_signal": best_signal,
-        "best_a11": best_a11,
-        "ok_alert": int(ok_alert),
-        "source_rows_hist_used": source_rows,
+        "best_signal": out.best_signal,
+        "best_a11": out.best_a11,
+        "ok_alert": int(out.ok_alert),
+        "source_rows_hist_used": min(len(draws), s.window_n),
         "same_day_mid_present": int(same_day_mid_present),
         "mid_today_nums": mid_today_nums,
-        "model_version": "LN-quiniela-v1",
         "debug_json": str(out.debug),
+        "model_version": "LN-quiniela-v1",
     }
-
     append_csv("data/picks_log.csv", row, PICKS_HEADER)
 
-    # Mensaje Telegram
-    title = "Gana Más" if target == "MID" else "Noche"
     msg = (
         f"🚨 <b>LN QUINIELA</b>\n"
         f"📅 {fecha} | 🎯 {title} | ⏰ Slot {slot}\n\n"
         f"✅ <b>Top3</b>: {', '.join(out.top3)}\n"
         f"📌 <b>Top12</b>: {', '.join(out.top12)}\n\n"
         f"🧩 same_day_mid_present: {same_day_mid_present}\n"
-        f"📊 rows_used: {source_rows}\n"
+        f"🧠 best_signal: {out.best_signal:.6f} | a11: {out.best_a11} | alert: {out.ok_alert}\n"
+        f"📊 rows_used: {min(len(draws), s.window_n)}\n"
     )
     send_telegram_message(msg, token, chat_id)
 
-def run_performance(history_rows):
-    # Busca resultados ya existentes y cruza contra picks_log
-    # (Aquí dejamos listo el pipeline; si quieres, migramos a SQLite para joins más fáciles.)
-    import csv, os
-
+def run_performance(history: List[Row]):
     picks_path = "data/picks_log.csv"
     perf_path = "data/performance_log.csv"
-
     if not os.path.exists(picks_path):
         return
 
-    # Cargar picks
+    # cargar picks
     with open(picks_path, "r", encoding="utf-8") as f:
         picks = list(csv.DictReader(f))
 
-    # Indexar resultados por draw_id
+    # index resultados por draw_id
     results = {}
-    for r in history_rows:
-        label = "MID" if r.sorteo == DRAW_GANAMAS else "NIGHT"
-        did = draw_id(r.fecha, label)
-        results[did] = (r.primero, r.segundo, r.tercero)
+    for r in history:
+        label = LABEL_MAP.get(r.sorteo, "")
+        if not label:
+            continue
+        results[draw_id(r.fecha, label)] = (r.primero, r.segundo, r.tercero)
 
-    # Dedupe: no repetir performance si ya existe
-    existing_perf_keys = set()
+    # dedupe performance ya calculado
+    existing_keys = set()
     if os.path.exists(perf_path):
         with open(perf_path, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                existing_perf_keys.add((row["draw_id"], row["picked_from_ts_run"]))
+                existing_keys.add((row["draw_id"], row["picked_from_ts_run"]))
 
     for p in picks:
         did = p["target_draw_id"]
@@ -226,13 +197,12 @@ def run_performance(history_rows):
             continue
 
         key = (did, p["ts_run"])
-        if key in existing_perf_keys:
+        if key in existing_keys:
             continue
 
         observed = results[did]
         top3 = p["top3"].split(",") if p["top3"] else []
         top12 = p["top12"].split(",") if p["top12"] else []
-
         stats = score_hits(top3, top12, observed)
 
         row = {
