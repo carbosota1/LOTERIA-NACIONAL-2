@@ -1,3 +1,4 @@
 ts_run,schedule_slot,target_draw_id,window_n,top3,top12,best_signal,best_a11,ok_alert,source_rows_hist_used,same_day_mid_present,mid_today_nums,debug_json,model_version
 2026-02-19T05:16:14Z,manual,LN|2026-02-19|MID,120,"06,82,52","06,82,52,42,77,78,18,83,88,97,20,91",0.27228028870006005,12,1,120,0,,"{'window_used': 120, 'top_score': 0.27228028870006005, 'top12_bottom_score': 0.2620903378029984, 'best_a11': 12}",LN-quiniela-v1
 2026-02-19T19:30:12Z,13:00,LN|2026-02-19|NIGHT,120,"13,71,16","13,71,16,19,40,61,06,95,56,39,14,52",0.2765453181968924,12,1,120,1,"31,30,04","{'window_used': 120, 'top_score': 0.2765453181968924, 'top12_bottom_score': 0.25920052846500913, 'best_a11': 12}",LN-quiniela-v1
+2026-02-19T21:03:37Z,16:00,LN|2026-02-19|NIGHT,120,"13,71,16","13,71,16,19,40,61,06,95,56,39,14,52",0.2765453181968924,12,1,120,1,"31,30,04","{'window_used': 120, 'top_score': 0.2765453181968924, 'top12_bottom_score': 0.25920052846500913, 'best_a11': 12}",LN-quiniela-v1
