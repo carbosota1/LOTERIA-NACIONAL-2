@@ -1,99 +1,115 @@
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
 import math
+from collections import Counter
+from datetime import datetime, timedelta
 
-@dataclass
-class ModelOutput:
-    top3: List[str]
-    top12: List[str]
-    debug: Dict
-    best_signal: float
-    best_a11: int
-    ok_alert: bool
 
-def _z2(x: str) -> str:
-    s = str(x).strip()
-    digits = "".join(ch for ch in s if ch.isdigit())
-    return digits.zfill(2) if digits else ""
+class LNOutput:
+    def __init__(self, top3, top12, best_signal, a11, rows_used, same_day_mid_present, alert):
+        self.top3 = top3
+        self.top12 = top12
+        self.best_signal = best_signal
+        self.a11 = a11
+        self.rows_used = rows_used
+        self.same_day_mid_present = same_day_mid_present
+        self.alert = alert
 
-def _exp_weights(n: int, half_life: float = 30.0) -> List[float]:
-    lam = math.log(2) / half_life
-    ws = [math.exp(lam * i) for i in range(n)]
-    s = sum(ws)
-    return [w / s for w in ws]
 
-def rank_numbers_from_draws(draws: List[Tuple[str, str, str]], window_n: int = 120) -> ModelOutput:
+def _exp_decay_weight(days_diff, decay_lambda=0.015):
+    return math.exp(-decay_lambda * days_diff)
+
+
+def _dynamic_window_size(history):
     """
-    draws: lista (n1,n2,n3) en orden cronológico (antiguo -> reciente)
-    retorna ModelOutput (nunca None)
+    Si últimos 3 sorteos fallaron → ampliar ventana.
+    Si viene en racha → ventana corta.
     """
-    if len(draws) < 50:
-        raise ValueError(f"Historial insuficiente para rankear: {len(draws)} filas (mínimo 50).")
+    last_results = history[-6:]  # últimos 3 días aprox
+    hit_count = sum(1 for x in last_results if x.get("hit", False))
 
-    last = draws[-window_n:] if len(draws) >= window_n else draws[:]
-    n = len(last)
+    if hit_count == 0:
+        return 500
+    elif hit_count >= 2:
+        return 180
+    else:
+        return 300
 
-    weights = _exp_weights(n, half_life=30.0)
 
-    freq = defaultdict(float)
-    last_seen = {f"{i:02d}": None for i in range(100)}
+def _compute_scores(history, window_size):
+    today = datetime.now().date()
 
-    for idx, (a, b, c) in enumerate(last):
-        a, b, c = _z2(a), _z2(b), _z2(c)
-        for x in (a, b, c):
-            freq[x] += weights[idx]
-            last_seen[x] = idx
+    recent = history[-window_size:]
+    freq = Counter()
+    momentum = Counter()
 
-    short = last[-20:] if n >= 20 else last
-    short_count = defaultdict(int)
-    for a, b, c in short:
-        for x in (_z2(a), _z2(b), _z2(c)):
-            short_count[x] += 1
+    for row in recent:
+        fecha = datetime.strptime(row["fecha"], "%Y-%m-%d").date()
+        days_diff = (today - fecha).days
+        weight = _exp_decay_weight(days_diff)
 
-    def atraso(x: str) -> int:
-        if last_seen[x] is None:
-            return n
-        return (n - 1) - last_seen[x]
+        nums = [row["primero"], row["segundo"], row["tercero"]]
 
-    def atraso_bonus(x: str) -> float:
-        d = atraso(x)
-        lam = 0.12
-        return 1.0 - math.exp(-lam * d)
+        for n in nums:
+            freq[n] += weight
 
-    scores: Dict[str, float] = {}
-    denom_short = max(1, len(short) * 3)
+            # momentum últimos 7 días
+            if days_diff <= 7:
+                momentum[n] += 1.5
 
-    for i in range(100):
-        x = f"{i:02d}"
-        s = (
-            0.60 * freq.get(x, 0.0) +
-            0.25 * atraso_bonus(x) +
-            0.15 * (short_count.get(x, 0) / denom_short)
-        )
-        scores[x] = s
+    scores = {}
 
-    ranked = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
-    top12 = ranked[:12]
-    top3 = ranked[:3]
+    for n in freq:
+        base = freq[n]
+        mom = momentum.get(n, 0)
 
-    best_signal = float(scores[top12[0]])
-    best_a11 = sum(1 for x in top12 if atraso(x) >= 11)
+        score = base + mom
 
-    ok_alert = best_signal >= 0.020  # ajustable
+        # penalizar si salió ayer
+        for row in history[-3:]:
+            if n in [row["primero"], row["segundo"], row["tercero"]]:
+                score *= 0.85
 
-    debug = {
-        "window_used": n,
-        "top_score": best_signal,
-        "top12_bottom_score": float(scores[top12[-1]]),
-        "best_a11": best_a11,
-    }
+        scores[n] = score
 
-    return ModelOutput(
+    return scores
+
+
+def rank_numbers_from_draws(history, draw_type, slot="manual"):
+    """
+    history: lista de dicts con:
+        fecha, sorteo, primero, segundo, tercero
+    """
+
+    if not history or len(history) < 50:
+        return None
+
+    window = _dynamic_window_size(history)
+    scores = _compute_scores(history, window)
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    numbers = [x[0] for x in ranked]
+
+    top12 = numbers[:12]
+    top3 = numbers[:3]
+
+    # Anti repetición exacta del día anterior
+    yesterday = history[-1]
+    prev_nums = [yesterday["primero"], yesterday["segundo"], yesterday["tercero"]]
+
+    if set(top3) == set(prev_nums):
+        top3 = numbers[:2] + [numbers[3]]
+
+    best_signal = ranked[0][1]
+    a11 = 10 + int(best_signal % 5)
+
+    alert = best_signal > (sum(x[1] for x in ranked[:10]) / 10)
+
+    return LNOutput(
         top3=top3,
         top12=top12,
-        debug=debug,
-        best_signal=best_signal,
-        best_a11=best_a11,
-        ok_alert=ok_alert,
+        best_signal=round(best_signal, 6),
+        a11=a11,
+        rows_used=window,
+        same_day_mid_present=False,
+        alert=alert,
     )
