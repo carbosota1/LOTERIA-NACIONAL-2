@@ -21,8 +21,9 @@ def _exp_decay_weight(days_diff, decay_lambda=0.015):
 def _extract_row_fields(row):
     """
     Soporta:
-    dict -> row["fecha"]
-    tuple -> (fecha, sorteo, primero, segundo, tercero)
+    dict
+    tuple 4 columnas
+    tuple 5 columnas
     """
 
     if isinstance(row, dict):
@@ -34,12 +35,17 @@ def _extract_row_fields(row):
         )
 
     # si es tuple/list
-    return (
-        row[0],  # fecha
-        row[2],  # primero
-        row[3],  # segundo
-        row[4],  # tercero
-    )
+    row_len = len(row)
+
+    if row_len >= 5:
+        # fecha, sorteo, p1, p2, p3
+        return row[0], row[2], row[3], row[4]
+
+    if row_len == 4:
+        # fecha, p1, p2, p3
+        return row[0], row[1], row[2], row[3]
+
+    raise ValueError("Formato de history no reconocido")
 
 
 def _compute_scores(history, window_size):
@@ -50,13 +56,13 @@ def _compute_scores(history, window_size):
     momentum = Counter()
 
     for row in recent:
-        fecha, primero, segundo, tercero = _extract_row_fields(row)
+        fecha, p1, p2, p3 = _extract_row_fields(row)
 
         fecha_dt = datetime.strptime(str(fecha), "%Y-%m-%d").date()
         days_diff = (today - fecha_dt).days
         weight = _exp_decay_weight(days_diff)
 
-        nums = [primero, segundo, tercero]
+        nums = [p1, p2, p3]
 
         for n in nums:
             freq[n] += weight
@@ -72,8 +78,8 @@ def _compute_scores(history, window_size):
 
         # penalización si salió en últimos 3 sorteos
         for row in history[-3:]:
-            _, p1, p2, p3 = _extract_row_fields(row)
-            if n in [p1, p2, p3]:
+            _, rp1, rp2, rp3 = _extract_row_fields(row)
+            if n in [rp1, rp2, rp3]:
                 score *= 0.85
 
         scores[n] = score
@@ -97,10 +103,10 @@ def rank_numbers_from_draws(history, draw_type=None, slot=None, window_n=None):
     top12 = numbers[:12]
     top3 = numbers[:3]
 
-    # anti repetición exacta del sorteo anterior
+    # Anti repetición exacta
     last_row = history[-1]
-    _, p1, p2, p3 = _extract_row_fields(last_row)
-    prev_nums = [p1, p2, p3]
+    _, lp1, lp2, lp3 = _extract_row_fields(last_row)
+    prev_nums = [lp1, lp2, lp3]
 
     if set(top3) == set(prev_nums) and len(numbers) > 3:
         top3 = numbers[:2] + [numbers[3]]
