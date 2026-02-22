@@ -1,6 +1,6 @@
 import math
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 class LNOutput:
@@ -19,11 +19,7 @@ def _exp_decay_weight(days_diff, decay_lambda=0.015):
 
 
 def _dynamic_window_size(history):
-    """
-    Si últimos 3 sorteos fallaron → ampliar ventana.
-    Si viene en racha → ventana corta.
-    """
-    last_results = history[-6:]  # últimos 3 días aprox
+    last_results = history[-6:]
     hit_count = sum(1 for x in last_results if x.get("hit", False))
 
     if hit_count == 0:
@@ -36,8 +32,8 @@ def _dynamic_window_size(history):
 
 def _compute_scores(history, window_size):
     today = datetime.now().date()
-
     recent = history[-window_size:]
+
     freq = Counter()
     momentum = Counter()
 
@@ -50,8 +46,6 @@ def _compute_scores(history, window_size):
 
         for n in nums:
             freq[n] += weight
-
-            # momentum últimos 7 días
             if days_diff <= 7:
                 momentum[n] += 1.5
 
@@ -60,10 +54,9 @@ def _compute_scores(history, window_size):
     for n in freq:
         base = freq[n]
         mom = momentum.get(n, 0)
-
         score = base + mom
 
-        # penalizar si salió ayer
+        # Penalización si salió recientemente
         for row in history[-3:]:
             if n in [row["primero"], row["segundo"], row["tercero"]]:
                 score *= 0.85
@@ -73,16 +66,18 @@ def _compute_scores(history, window_size):
     return scores
 
 
-def rank_numbers_from_draws(history, draw_type, slot="manual"):
-    """
-    history: lista de dicts con:
-        fecha, sorteo, primero, segundo, tercero
-    """
+# 👇 IMPORTANTE: agregamos window_n=None para compatibilidad
+def rank_numbers_from_draws(history, draw_type, slot="manual", window_n=None):
 
     if not history or len(history) < 50:
         return None
 
-    window = _dynamic_window_size(history)
+    # Si runner manda window_n lo respetamos
+    if window_n:
+        window = window_n
+    else:
+        window = _dynamic_window_size(history)
+
     scores = _compute_scores(history, window)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -96,7 +91,7 @@ def rank_numbers_from_draws(history, draw_type, slot="manual"):
     yesterday = history[-1]
     prev_nums = [yesterday["primero"], yesterday["segundo"], yesterday["tercero"]]
 
-    if set(top3) == set(prev_nums):
+    if set(top3) == set(prev_nums) and len(numbers) > 3:
         top3 = numbers[:2] + [numbers[3]]
 
     best_signal = ranked[0][1]
