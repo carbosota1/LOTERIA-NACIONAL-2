@@ -18,9 +18,28 @@ def _exp_decay_weight(days_diff, decay_lambda=0.015):
     return math.exp(-decay_lambda * days_diff)
 
 
-def _dynamic_window_size(history):
-    # Si no tienes flag "hit" aún, simplemente usa 300
-    return 300
+def _extract_row_fields(row):
+    """
+    Soporta:
+    dict -> row["fecha"]
+    tuple -> (fecha, sorteo, primero, segundo, tercero)
+    """
+
+    if isinstance(row, dict):
+        return (
+            row["fecha"],
+            row["primero"],
+            row["segundo"],
+            row["tercero"],
+        )
+
+    # si es tuple/list
+    return (
+        row[0],  # fecha
+        row[2],  # primero
+        row[3],  # segundo
+        row[4],  # tercero
+    )
 
 
 def _compute_scores(history, window_size):
@@ -31,11 +50,13 @@ def _compute_scores(history, window_size):
     momentum = Counter()
 
     for row in recent:
-        fecha = datetime.strptime(row["fecha"], "%Y-%m-%d").date()
-        days_diff = (today - fecha).days
+        fecha, primero, segundo, tercero = _extract_row_fields(row)
+
+        fecha_dt = datetime.strptime(str(fecha), "%Y-%m-%d").date()
+        days_diff = (today - fecha_dt).days
         weight = _exp_decay_weight(days_diff)
 
-        nums = [row["primero"], row["segundo"], row["tercero"]]
+        nums = [primero, segundo, tercero]
 
         for n in nums:
             freq[n] += weight
@@ -49,9 +70,10 @@ def _compute_scores(history, window_size):
         mom = momentum.get(n, 0)
         score = base + mom
 
-        # Penalización si salió recientemente
+        # penalización si salió en últimos 3 sorteos
         for row in history[-3:]:
-            if n in [row["primero"], row["segundo"], row["tercero"]]:
+            _, p1, p2, p3 = _extract_row_fields(row)
+            if n in [p1, p2, p3]:
                 score *= 0.85
 
         scores[n] = score
@@ -59,17 +81,12 @@ def _compute_scores(history, window_size):
     return scores
 
 
-# 🔒 BLINDADA: todos los parámetros opcionales
 def rank_numbers_from_draws(history, draw_type=None, slot=None, window_n=None):
 
     if not history or len(history) < 50:
         return None
 
-    # Si runner manda window_n lo respetamos
-    if window_n:
-        window = window_n
-    else:
-        window = _dynamic_window_size(history)
+    window = window_n if window_n else 300
 
     scores = _compute_scores(history, window)
 
@@ -80,9 +97,10 @@ def rank_numbers_from_draws(history, draw_type=None, slot=None, window_n=None):
     top12 = numbers[:12]
     top3 = numbers[:3]
 
-    # Anti repetición del día anterior
-    yesterday = history[-1]
-    prev_nums = [yesterday["primero"], yesterday["segundo"], yesterday["tercero"]]
+    # anti repetición exacta del sorteo anterior
+    last_row = history[-1]
+    _, p1, p2, p3 = _extract_row_fields(last_row)
+    prev_nums = [p1, p2, p3]
 
     if set(top3) == set(prev_nums) and len(numbers) > 3:
         top3 = numbers[:2] + [numbers[3]]
