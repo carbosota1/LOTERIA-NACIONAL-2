@@ -19,15 +19,8 @@ def _exp_decay_weight(days_diff, decay_lambda=0.015):
 
 
 def _dynamic_window_size(history):
-    last_results = history[-6:]
-    hit_count = sum(1 for x in last_results if x.get("hit", False))
-
-    if hit_count == 0:
-        return 500
-    elif hit_count >= 2:
-        return 180
-    else:
-        return 300
+    # Si no tienes flag "hit" aún, simplemente usa 300
+    return 300
 
 
 def _compute_scores(history, window_size):
@@ -66,8 +59,8 @@ def _compute_scores(history, window_size):
     return scores
 
 
-# 👇 IMPORTANTE: agregamos window_n=None para compatibilidad
-def rank_numbers_from_draws(history, draw_type, slot="manual", window_n=None):
+# 🔒 BLINDADA: todos los parámetros opcionales
+def rank_numbers_from_draws(history, draw_type=None, slot=None, window_n=None):
 
     if not history or len(history) < 50:
         return None
@@ -87,7 +80,7 @@ def rank_numbers_from_draws(history, draw_type, slot="manual", window_n=None):
     top12 = numbers[:12]
     top3 = numbers[:3]
 
-    # Anti repetición exacta del día anterior
+    # Anti repetición del día anterior
     yesterday = history[-1]
     prev_nums = [yesterday["primero"], yesterday["segundo"], yesterday["tercero"]]
 
@@ -96,7 +89,6 @@ def rank_numbers_from_draws(history, draw_type, slot="manual", window_n=None):
 
     best_signal = ranked[0][1]
     a11 = 10 + int(best_signal % 5)
-
     alert = best_signal > (sum(x[1] for x in ranked[:10]) / 10)
 
     return LNOutput(
