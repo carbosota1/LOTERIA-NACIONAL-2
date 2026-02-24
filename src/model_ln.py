@@ -1,100 +1,62 @@
+# ========================
+# FILE: src/model_ln.py
+# ========================
+
 import math
 from collections import Counter
-from datetime import datetime
 
 
 class LNOutput:
-    def __init__(self, top3, top12, best_signal, a11, rows_used, same_day_mid_present, alert):
+    def __init__(self, top3, top12, best_signal, best_a11, ok_alert, debug):
         self.top3 = top3
         self.top12 = top12
         self.best_signal = best_signal
-        self.a11 = a11
-        self.rows_used = rows_used
-        self.same_day_mid_present = same_day_mid_present
-        self.alert = alert
+        self.best_a11 = best_a11
+        self.ok_alert = ok_alert
+        self.debug = debug
 
 
-def _exp_decay_weight(days_diff, decay_lambda=0.015):
-    return math.exp(-decay_lambda * days_diff)
-
-
-def _extract_row_fields(row):
+def rank_numbers_from_draws(draws, window_n=300):
     """
-    Soporta:
-    dict
-    tuple 4 columnas
-    tuple 5 columnas
+    draws = List[Tuple[n1, n2, n3]]
+    EXACTAMENTE lo que tu runner envía.
     """
 
-    if isinstance(row, dict):
-        return (
-            row["fecha"],
-            row["primero"],
-            row["segundo"],
-            row["tercero"],
-        )
+    if not draws or len(draws) < 50:
+        raise ValueError("Historial insuficiente")
 
-    # si es tuple/list
-    row_len = len(row)
-
-    if row_len >= 5:
-        # fecha, sorteo, p1, p2, p3
-        return row[0], row[2], row[3], row[4]
-
-    if row_len == 4:
-        # fecha, p1, p2, p3
-        return row[0], row[1], row[2], row[3]
-
-    raise ValueError("Formato de history no reconocido")
-
-
-def _compute_scores(history, window_size):
-    today = datetime.now().date()
-    recent = history[-window_size:]
+    recent = draws[-window_n:]
 
     freq = Counter()
-    momentum = Counter()
+    last_7 = recent[-7:]
+    last_3 = recent[-3:]
 
-    for row in recent:
-        fecha, p1, p2, p3 = _extract_row_fields(row)
-
-        fecha_dt = datetime.strptime(str(fecha), "%Y-%m-%d").date()
-        days_diff = (today - fecha_dt).days
-        weight = _exp_decay_weight(days_diff)
-
-        nums = [p1, p2, p3]
-
-        for n in nums:
-            freq[n] += weight
-            if days_diff <= 7:
-                momentum[n] += 1.5
+    # Frecuencia base
+    for n1, n2, n3 in recent:
+        freq[n1] += 1
+        freq[n2] += 1
+        freq[n3] += 1
 
     scores = {}
 
-    for n in freq:
-        base = freq[n]
-        mom = momentum.get(n, 0)
-        score = base + mom
+    for num in freq:
 
-        # penalización si salió en últimos 3 sorteos
-        for row in history[-3:]:
-            _, rp1, rp2, rp3 = _extract_row_fields(row)
-            if n in [rp1, rp2, rp3]:
+        base = freq[num]
+
+        # Momentum últimos 7 sorteos
+        momentum = 0
+        for n1, n2, n3 in last_7:
+            if num in (n1, n2, n3):
+                momentum += 1.5
+
+        score = base + momentum
+
+        # Penalización si salió en últimos 3
+        for n1, n2, n3 in last_3:
+            if num in (n1, n2, n3):
                 score *= 0.85
 
-        scores[n] = score
-
-    return scores
-
-
-def rank_numbers_from_draws(history, draw_type=None, slot=None, window_n=None):
-
-    if not history or len(history) < 50:
-        return None
-
-    window = window_n if window_n else 300
-
-    scores = _compute_scores(history, window)
+        scores[num] = score
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
@@ -103,24 +65,30 @@ def rank_numbers_from_draws(history, draw_type=None, slot=None, window_n=None):
     top12 = numbers[:12]
     top3 = numbers[:3]
 
-    # Anti repetición exacta
-    last_row = history[-1]
-    _, lp1, lp2, lp3 = _extract_row_fields(last_row)
-    prev_nums = [lp1, lp2, lp3]
-
-    if set(top3) == set(prev_nums) and len(numbers) > 3:
+    # Anti repetir exactamente el último sorteo
+    last_draw = recent[-1]
+    if set(top3) == set(last_draw) and len(numbers) > 3:
         top3 = numbers[:2] + [numbers[3]]
 
     best_signal = ranked[0][1]
-    a11 = 10 + int(best_signal % 5)
-    alert = best_signal > (sum(x[1] for x in ranked[:10]) / 10)
+
+    # A11 dinámico basado en dispersión
+    avg_top10 = sum(x[1] for x in ranked[:10]) / 10
+    variance = sum((x[1] - avg_top10) ** 2 for x in ranked[:10]) / 10
+    best_a11 = int(10 + variance % 5)
+
+    ok_alert = best_signal > avg_top10
+
+    debug = {
+        "unique_numbers": len(freq),
+        "window_used": len(recent),
+    }
 
     return LNOutput(
         top3=top3,
         top12=top12,
         best_signal=round(best_signal, 6),
-        a11=a11,
-        rows_used=window,
-        same_day_mid_present=False,
-        alert=alert,
+        best_a11=best_a11,
+        ok_alert=ok_alert,
+        debug=debug,
     )
