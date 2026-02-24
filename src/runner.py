@@ -254,7 +254,7 @@ def run_picks(history: List[Row], fecha: str, slot: str):
         return
 
     try:
-        out = rank_numbers_from_draws(draws, window_n=s.window_n)
+        out = rank_numbers_from_draws(draws)
     except Exception as e:
         send_telegram_message(f"⚠️ LN {title}: error modelo: {e}", token, chat_id)
         return
