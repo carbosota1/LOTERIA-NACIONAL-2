@@ -1,148 +1,71 @@
-import pandas as pd
-import numpy as np
-from datetime import datetime
+# ========================
+# FILE: src/model_ln.py
+# ========================
+
+from dataclasses import dataclass
+from typing import List, Tuple, Dict
+from collections import Counter
 
 
-# ==========================================================
-# UTILIDADES
-# ==========================================================
-
-def _normalize_numbers(df):
-    for col in ["primero", "segundo", "tercero"]:
-        df[col] = df[col].astype(str).str.zfill(2)
-    return df
-
-
-def _flatten_draws(df):
-    return pd.concat([
-        df["primero"],
-        df["segundo"],
-        df["tercero"]
-    ]).reset_index(drop=True)
+@dataclass
+class ModelOutput:
+    top3: List[str]
+    top12: List[str]
+    best_signal: float
+    best_a11: int
+    ok_alert: bool
+    debug: Dict
 
 
-def _weighted_counts(series, alpha=0.97):
+def rank_numbers_from_draws(
+    draws: List[Tuple[str, str, str]],
+    window_n: int = 120
+) -> ModelOutput:
     """
-    Peso exponencial: más reciente pesa más
-    """
-    weights = np.array([alpha ** i for i in range(len(series))])
-    weights = weights[::-1]
-    return series.groupby(series).apply(
-        lambda x: weights[x.index].sum()
-    )
-
-
-def _decade(n):
-    return int(n) // 10
-
-
-# ==========================================================
-# MODELO PRINCIPAL
-# ==========================================================
-
-def rank_numbers_from_draws(history_df, draw_type):
-    """
-    history_df: dataframe completo
-    draw_type: "Gana Más" o "Noche"
+    draws: lista de tuplas (n1, n2, n3)
+    window_n: cantidad máxima de sorteos a usar desde el final
     """
 
-    if history_df is None or len(history_df) < 50:
-        raise ValueError("History insuficiente.")
+    if not draws:
+        raise ValueError("Historial vacío")
 
-    df = history_df.copy()
+    # Usar solo los últimos window_n sorteos
+    draws_slice = draws[-window_n:] if len(draws) > window_n else draws
 
-    df = df[df["sorteo"].str.contains(draw_type, case=False, na=False)]
+    counter = Counter()
 
-    if len(df) < 50:
-        raise ValueError("No hay suficientes datos para ese sorteo.")
+    for n1, n2, n3 in draws_slice:
+        counter[n1] += 1
+        counter[n2] += 1
+        counter[n3] += 1
 
-    df = _normalize_numbers(df)
+    # Ordenar por frecuencia
+    ranked = sorted(counter.items(), key=lambda x: x[1], reverse=True)
 
-    # ==========================================
-    # WINDOW DINÁMICO
-    # ==========================================
-    WINDOW = 350
-    df = df.tail(WINDOW)
+    top_numbers = [num for num, _ in ranked[:12]]
 
-    flat = _flatten_draws(df)
+    # Asegurar siempre 12 números
+    while len(top_numbers) < 12:
+        top_numbers.append("00")
 
-    if len(flat) < 50:
-        raise ValueError("History muy corto tras filtrar.")
+    top3 = top_numbers[:3]
 
-    # ==========================================
-    # BASE SCORE (peso exponencial)
-    # ==========================================
-    weighted = _weighted_counts(flat)
+    # Métricas simples
+    best_signal = float(ranked[0][1]) if ranked else 0.0
+    best_a11 = len([c for _, c in ranked[:11]])
 
-    score = {}
-    for n in [f"{i:02d}" for i in range(100)]:
-        score[n] = weighted.get(n, 0.0)
+    ok_alert = best_signal > 5  # puedes ajustar esto luego
 
-    # ==========================================
-    # ATRASO ESTRUCTURAL
-    # ==========================================
-    last_seen = {}
-    reversed_flat = flat[::-1].reset_index(drop=True)
-
-    for n in score.keys():
-        try:
-            idx = reversed_flat[reversed_flat == n].index[0]
-            last_seen[n] = idx
-        except:
-            last_seen[n] = len(flat)
-
-    atraso_prom = np.mean(list(last_seen.values()))
-
-    for n in score:
-        if last_seen[n] > atraso_prom:
-            score[n] *= 1.15  # boost atraso
-
-    # ==========================================
-    # SOBRECALENTAMIENTO (penalización reciente)
-    # ==========================================
-    recent = flat.tail(12)
-    recent_counts = recent.value_counts()
-
-    for n, c in recent_counts.items():
-        if c >= 2:
-            score[n] *= 0.70  # penalización fuerte
-
-    # ==========================================
-    # BALANCE POR DECENAS
-    # ==========================================
-    decades = {}
-    for n in score:
-        d = _decade(n)
-        decades.setdefault(d, 0)
-        decades[d] += score[n]
-
-    decade_avg = np.mean(list(decades.values()))
-
-    for n in score:
-        d = _decade(n)
-        if decades[d] < decade_avg:
-            score[n] *= 1.10  # boost decena fría
-
-    # ==========================================
-    # NORMALIZAR
-    # ==========================================
-    total = sum(score.values())
-    if total == 0:
-        raise ValueError("Score total 0.")
-
-    for n in score:
-        score[n] = score[n] / total
-
-    ranked = sorted(score.items(), key=lambda x: x[1], reverse=True)
-
-    top12 = [n for n, _ in ranked[:12]]
-    top3 = top12[:3]
-
-    best_signal = ranked[0][1]
-
-    return {
-        "top3": top3,
-        "top12": top12,
-        "best_signal": round(best_signal, 6),
-        "rows_used": len(df)
+    debug = {
+        "total_draws_used": len(draws_slice),
+        "unique_numbers": len(counter)
     }
+
+    return ModelOutput(
+        top3=top3,
+        top12=top_numbers,
+        best_signal=best_signal,
+        best_a11=best_a11,
+        ok_alert=ok_alert,
+        debug=debug
+    )
