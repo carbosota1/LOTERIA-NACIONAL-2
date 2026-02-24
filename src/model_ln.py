@@ -1,94 +1,148 @@
-# ========================
-# FILE: src/model_ln.py
-# ========================
-
-import math
-from collections import Counter
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
 
-class LNOutput:
-    def __init__(self, top3, top12, best_signal, best_a11, ok_alert, debug):
-        self.top3 = top3
-        self.top12 = top12
-        self.best_signal = best_signal
-        self.best_a11 = best_a11
-        self.ok_alert = ok_alert
-        self.debug = debug
+# ==========================================================
+# UTILIDADES
+# ==========================================================
+
+def _normalize_numbers(df):
+    for col in ["primero", "segundo", "tercero"]:
+        df[col] = df[col].astype(str).str.zfill(2)
+    return df
 
 
-def rank_numbers_from_draws(draws, window_n=300):
+def _flatten_draws(df):
+    return pd.concat([
+        df["primero"],
+        df["segundo"],
+        df["tercero"]
+    ]).reset_index(drop=True)
+
+
+def _weighted_counts(series, alpha=0.97):
     """
-    draws = List[Tuple[n1, n2, n3]]
-    EXACTAMENTE lo que tu runner envía.
+    Peso exponencial: más reciente pesa más
+    """
+    weights = np.array([alpha ** i for i in range(len(series))])
+    weights = weights[::-1]
+    return series.groupby(series).apply(
+        lambda x: weights[x.index].sum()
+    )
+
+
+def _decade(n):
+    return int(n) // 10
+
+
+# ==========================================================
+# MODELO PRINCIPAL
+# ==========================================================
+
+def rank_numbers_from_draws(history_df, draw_type):
+    """
+    history_df: dataframe completo
+    draw_type: "Gana Más" o "Noche"
     """
 
-    if not draws or len(draws) < 50:
-        raise ValueError("Historial insuficiente")
+    if history_df is None or len(history_df) < 50:
+        raise ValueError("History insuficiente.")
 
-    recent = draws[-window_n:]
+    df = history_df.copy()
 
-    freq = Counter()
-    last_7 = recent[-7:]
-    last_3 = recent[-3:]
+    df = df[df["sorteo"].str.contains(draw_type, case=False, na=False)]
 
-    # Frecuencia base
-    for n1, n2, n3 in recent:
-        freq[n1] += 1
-        freq[n2] += 1
-        freq[n3] += 1
+    if len(df) < 50:
+        raise ValueError("No hay suficientes datos para ese sorteo.")
 
-    scores = {}
+    df = _normalize_numbers(df)
 
-    for num in freq:
+    # ==========================================
+    # WINDOW DINÁMICO
+    # ==========================================
+    WINDOW = 350
+    df = df.tail(WINDOW)
 
-        base = freq[num]
+    flat = _flatten_draws(df)
 
-        # Momentum últimos 7 sorteos
-        momentum = 0
-        for n1, n2, n3 in last_7:
-            if num in (n1, n2, n3):
-                momentum += 1.5
+    if len(flat) < 50:
+        raise ValueError("History muy corto tras filtrar.")
 
-        score = base + momentum
+    # ==========================================
+    # BASE SCORE (peso exponencial)
+    # ==========================================
+    weighted = _weighted_counts(flat)
 
-        # Penalización si salió en últimos 3
-        for n1, n2, n3 in last_3:
-            if num in (n1, n2, n3):
-                score *= 0.85
+    score = {}
+    for n in [f"{i:02d}" for i in range(100)]:
+        score[n] = weighted.get(n, 0.0)
 
-        scores[num] = score
+    # ==========================================
+    # ATRASO ESTRUCTURAL
+    # ==========================================
+    last_seen = {}
+    reversed_flat = flat[::-1].reset_index(drop=True)
 
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    for n in score.keys():
+        try:
+            idx = reversed_flat[reversed_flat == n].index[0]
+            last_seen[n] = idx
+        except:
+            last_seen[n] = len(flat)
 
-    numbers = [x[0] for x in ranked]
+    atraso_prom = np.mean(list(last_seen.values()))
 
-    top12 = numbers[:12]
-    top3 = numbers[:3]
+    for n in score:
+        if last_seen[n] > atraso_prom:
+            score[n] *= 1.15  # boost atraso
 
-    # Anti repetir exactamente el último sorteo
-    last_draw = recent[-1]
-    if set(top3) == set(last_draw) and len(numbers) > 3:
-        top3 = numbers[:2] + [numbers[3]]
+    # ==========================================
+    # SOBRECALENTAMIENTO (penalización reciente)
+    # ==========================================
+    recent = flat.tail(12)
+    recent_counts = recent.value_counts()
+
+    for n, c in recent_counts.items():
+        if c >= 2:
+            score[n] *= 0.70  # penalización fuerte
+
+    # ==========================================
+    # BALANCE POR DECENAS
+    # ==========================================
+    decades = {}
+    for n in score:
+        d = _decade(n)
+        decades.setdefault(d, 0)
+        decades[d] += score[n]
+
+    decade_avg = np.mean(list(decades.values()))
+
+    for n in score:
+        d = _decade(n)
+        if decades[d] < decade_avg:
+            score[n] *= 1.10  # boost decena fría
+
+    # ==========================================
+    # NORMALIZAR
+    # ==========================================
+    total = sum(score.values())
+    if total == 0:
+        raise ValueError("Score total 0.")
+
+    for n in score:
+        score[n] = score[n] / total
+
+    ranked = sorted(score.items(), key=lambda x: x[1], reverse=True)
+
+    top12 = [n for n, _ in ranked[:12]]
+    top3 = top12[:3]
 
     best_signal = ranked[0][1]
 
-    # A11 dinámico basado en dispersión
-    avg_top10 = sum(x[1] for x in ranked[:10]) / 10
-    variance = sum((x[1] - avg_top10) ** 2 for x in ranked[:10]) / 10
-    best_a11 = int(10 + variance % 5)
-
-    ok_alert = best_signal > avg_top10
-
-    debug = {
-        "unique_numbers": len(freq),
-        "window_used": len(recent),
+    return {
+        "top3": top3,
+        "top12": top12,
+        "best_signal": round(best_signal, 6),
+        "rows_used": len(df)
     }
-
-    return LNOutput(
-        top3=top3,
-        top12=top12,
-        best_signal=round(best_signal, 6),
-        best_a11=best_a11,
-        ok_alert=ok_alert,
-        debug=debug,
-    )
