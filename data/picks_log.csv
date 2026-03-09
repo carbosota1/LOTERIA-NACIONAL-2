@@ -38,3 +38,4 @@ ts_run,schedule_slot,target_draw_id,window_n,top3,top12,best_signal,best_a11,ok_
 2026-03-08T17:18:30Z,13:00,LN|2026-03-08|MID,120,"25,51,19","25,51,19,80,37,12,15,04,41,08,39,07",2.2366322969359875,4,0,120,0,,"{'window_used': 200, 'regime': 'MEAN_REVERSION', 'unique_numbers': 100}",LN-quiniela-v1
 2026-03-08T20:12:35Z,16:00,LN|2026-03-08|NIGHT,120,"38,79,35","38,79,35,08,11,44,21,00,13,68,19,61",2.777956885317414,7,0,120,1,"59,36,79","{'window_used': 200, 'regime': 'MEAN_REVERSION', 'unique_numbers': 100}",LN-quiniela-v1
 2026-03-09T17:43:11Z,13:00,LN|2026-03-09|MID,120,"25,51,19","25,51,19,15,37,41,80,12,04,79,08,07",2.2430382268550835,4,0,120,0,,"{'window_used': 200, 'regime': 'MEAN_REVERSION', 'unique_numbers': 100}",LN-quiniela-v1
+2026-03-09T20:20:02Z,16:00,LN|2026-03-09|NIGHT,120,"79,38,35","79,38,35,08,11,44,00,21,13,68,19,61",2.5540026866427654,5,0,120,1,"09,66,50","{'window_used': 200, 'regime': 'MEAN_REVERSION', 'unique_numbers': 100}",LN-quiniela-v1
