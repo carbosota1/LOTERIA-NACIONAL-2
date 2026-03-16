@@ -1,12 +1,13 @@
 # ========================
 # FILE: src/model_ln.py
-# LN QUINIELA V2
+# LN QUINIELA V3
+# Compatible con runner actual
 # ========================
 
 from dataclasses import dataclass
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
+from collections import defaultdict, Counter
 import math
-from collections import defaultdict
 
 
 @dataclass
@@ -19,115 +20,296 @@ class ModelOutput:
     debug: Dict
 
 
-# =========================
-# CORE MODEL
-# =========================
+# =========================================================
+# Helpers
+# =========================================================
 
-def rank_numbers_from_draws(draws: List[Tuple[str, str, str]]) -> ModelOutput:
+def _z2(x: str) -> str:
+    s = str(x).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits.zfill(2) if digits else "00"
+
+
+def _all_numbers() -> List[str]:
+    return [f"{i:02d}" for i in range(100)]
+
+
+def _decade(num: str) -> int:
+    return int(num) // 10
+
+
+def _adaptive_window(draws: List[Tuple[str, str, str]], requested_window: Optional[int] = None) -> int:
     """
-    draws: lista [(n1,n2,n3), ...]
+    Ventana adaptativa:
+    - Si runner manda window_n, se usa como techo.
+    - Base inteligente entre 140 y 200 según diversidad reciente.
+    """
+    n = len(draws)
+    if n <= 60:
+        return n
+
+    recent = draws[-40:]
+    flat_recent = [_z2(x) for triple in recent for x in triple]
+    unique_recent = len(set(flat_recent))
+
+    # menos diversidad reciente = usar más memoria
+    if unique_recent <= 55:
+        base = 200
+    elif unique_recent <= 70:
+        base = 170
+    else:
+        base = 140
+
+    if requested_window is not None:
+        base = min(base, requested_window)
+
+    return min(n, base)
+
+
+def _weighted_frequency(data: List[Tuple[str, str, str]], decay: float = 0.985) -> Dict[str, float]:
+    """
+    Frecuencia con recency bias.
+    Lo más reciente pesa más.
+    """
+    scores = defaultdict(float)
+    window = len(data)
+
+    for i, triple in enumerate(data):
+        # reciente -> peso alto
+        weight = decay ** (window - 1 - i)
+        for num in triple:
+            scores[_z2(num)] += weight
+
+    return scores
+
+
+def _recent_counts(data: List[Tuple[str, str, str]], last_n: int) -> Counter:
+    c = Counter()
+    for triple in data[-last_n:]:
+        for num in triple:
+            c[_z2(num)] += 1
+    return c
+
+
+def _last_seen_gap(data: List[Tuple[str, str, str]]) -> Dict[str, int]:
+    """
+    Gap = cuántos sorteos han pasado desde última aparición dentro de la ventana.
+    Si no aparece, gap = len(data)
+    """
+    gaps = {n: len(data) for n in _all_numbers()}
+
+    for idx in range(len(data) - 1, -1, -1):
+        triple = data[idx]
+        for num in triple:
+            num = _z2(num)
+            if gaps[num] == len(data):
+                gaps[num] = len(data) - 1 - idx
+
+    return gaps
+
+
+def _decade_pressure(data: List[Tuple[str, str, str]], last_n: int = 25) -> Dict[int, int]:
+    """
+    Cuenta presencia reciente por decena.
+    Decenas frías reciben boost leve.
+    """
+    dcount = defaultdict(int)
+    for triple in data[-last_n:]:
+        for num in triple:
+            dcount[_decade(_z2(num))] += 1
+    return dcount
+
+
+def _conditional_mid_bonus(num: str, mid_today: Optional[Tuple[str, str, str]]) -> float:
+    """
+    Hook preparado para MID -> NOCHE.
+    Sin tocar runner, no se activa.
+    Si luego pasas mid_today real, suma bonus leve por cercanía estructural.
+    """
+    if not mid_today:
+        return 0.0
+
+    bonus = 0.0
+    n = int(num)
+    for m in mid_today:
+        m_int = int(_z2(m))
+        # cercanía numérica leve
+        if abs(n - m_int) <= 2:
+            bonus += 0.08
+        # misma terminación
+        if n % 10 == m_int % 10:
+            bonus += 0.06
+        # misma decena
+        if n // 10 == m_int // 10:
+            bonus += 0.04
+    return bonus
+
+
+# =========================================================
+# Main model
+# =========================================================
+
+def rank_numbers_from_draws(
+    draws: List[Tuple[str, str, str]],
+    window_n: Optional[int] = None,
+    mid_today: Optional[Tuple[str, str, str]] = None
+) -> ModelOutput:
+    """
+    draws: lista de tuplas [(n1,n2,n3), ...]
     Compatible con tu runner actual.
+    Acepta window_n por compatibilidad.
     """
 
     if not draws or len(draws) < 50:
         raise ValueError("Historial insuficiente para modelo LN.")
 
-    # ---------
-    # WINDOW DINÁMICO
-    # ---------
-    MAX_WINDOW = 200
-    window = min(len(draws), MAX_WINDOW)
-    data = draws[-window:]
+    # normalizar
+    draws = [(_z2(a), _z2(b), _z2(c)) for a, b, c in draws]
 
-    # ---------
-    # CONFIG
-    # ---------
-    DECAY = 0.985          # peso exponencial
-    MOMENTUM_WINDOW = 20   # últimos 20 sorteos
-    OVERHEAT_THRESHOLD = 3 # repetido demasiadas veces reciente
+    # ventana adaptativa
+    window_used = _adaptive_window(draws, requested_window=window_n)
+    data = draws[-window_used:]
 
-    weighted_freq = defaultdict(float)
-    short_freq = defaultdict(int)
-    last_seen_index = {}
+    # componentes
+    wf = _weighted_frequency(data, decay=0.985)
+    mom12 = _recent_counts(data, last_n=12)
+    mom20 = _recent_counts(data, last_n=20)
+    recent8 = _recent_counts(data, last_n=8)
+    recent3 = _recent_counts(data, last_n=3)
+    gaps = _last_seen_gap(data)
+    decade_counts = _decade_pressure(data, last_n=25)
 
-    # ---------
-    # SCAN HISTORIAL
-    # ---------
-    for i, triple in enumerate(data):
-        decay_weight = DECAY ** (window - i)
+    decade_avg = sum(decade_counts.values()) / max(1, len(decade_counts)) if decade_counts else 0.0
+    avg_gap = sum(gaps.values()) / len(gaps)
 
-        for num in triple:
-            weighted_freq[num] += decay_weight
-            last_seen_index[num] = i
+    # score principal para Top12
+    scores: Dict[str, float] = {}
 
-    # momentum corto
-    for triple in data[-MOMENTUM_WINDOW:]:
-        for num in triple:
-            short_freq[num] += 1
+    for num in _all_numbers():
+        weighted_freq = wf.get(num, 0.0)
+        short_momentum = mom12.get(num, 0) * 0.22 + mom20.get(num, 0) * 0.10
 
-    # ---------
-    # SCORE FINAL
-    # ---------
-    scores = {}
+        # atraso controlado
+        gap = gaps.get(num, window_used)
+        gap_boost = math.log1p(gap) * 0.18
+        if gap > avg_gap:
+            gap_boost *= 1.10
 
-    for num in weighted_freq.keys():
+        # sobrecalentamiento
+        overheat_penalty = 0.0
+        if recent8.get(num, 0) >= 3:
+            overheat_penalty += 0.55
+        elif recent8.get(num, 0) == 2:
+            overheat_penalty += 0.25
 
-        wf = weighted_freq[num]
-        momentum = short_freq[num]
+        # si salió en últimos 3, castigo leve adicional
+        if recent3.get(num, 0) >= 1:
+            overheat_penalty += 0.18
 
-        # gap
-        gap = window - last_seen_index.get(num, window)
-        gap_score = math.log1p(gap)
+        # decena fría -> pequeño boost
+        d = _decade(num)
+        dec_count = decade_counts.get(d, 0)
+        decade_boost = 0.0
+        if dec_count < decade_avg:
+            decade_boost = 0.10
 
-        # penalización si está muy caliente
-        overheat_penalty = 0
-        if momentum >= OVERHEAT_THRESHOLD:
-            overheat_penalty = momentum * 0.8
+        # hook MID -> NOCHE (preparado)
+        cond_bonus = _conditional_mid_bonus(num, mid_today)
 
-        score = (
-            0.35 * wf +
-            0.25 * momentum +
-            0.20 * gap_score -
-            0.20 * overheat_penalty
+        final_score = (
+            0.42 * weighted_freq +
+            0.22 * short_momentum +
+            0.18 * gap_boost +
+            0.08 * decade_boost +
+            0.10 * cond_bonus
+            - 0.20 * overheat_penalty
         )
 
-        scores[num] = score
+        scores[num] = final_score
 
-    # ordenar
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    top12 = [n for n, _ in ranked[:12]]
 
-    top12 = [x[0] for x in ranked[:12]]
-    top3 = top12[:3]
+    # =====================================================
+    # Segundo ranking SOLO para Top3
+    # Aquí mejoramos el ordenamiento, que era el problema.
+    # =====================================================
+    top3_candidates = top12[:8]
+    last_draw = set(data[-1])
 
-    # métricas internas
-    best_signal = ranked[0][1]
-    best_a11 = sum(short_freq.get(n, 0) for n in top3)
+    top3_scores = {}
+    for num in top3_candidates:
+        base = scores[num]
 
-    ok_alert = best_signal > 5  # threshold empírico
+        # empujar números que no salieron en el último sorteo
+        novelty = 0.18 if num not in last_draw else -0.12
 
-    # ---------
-    # REGIME DETECTION
-    # ---------
-    avg_momentum = sum(short_freq.values()) / max(1, len(short_freq))
+        # empujar por gap de corto plazo
+        gap_short = min(gaps.get(num, window_used), 12) / 12.0
 
-    if avg_momentum > 2:
+        # castigar si está demasiado caliente en últimos 8
+        heat = recent8.get(num, 0)
+        heat_penalty = 0.18 * max(0, heat - 1)
+
+        # favorecer decenas no saturadas dentro del propio top12
+        same_decade_in_top12 = sum(1 for x in top12 if _decade(x) == _decade(num))
+        decade_diversity = -0.06 * max(0, same_decade_in_top12 - 2)
+
+        top3_scores[num] = base + novelty + 0.22 * gap_short - heat_penalty + decade_diversity
+
+    top3_ranked = sorted(top3_scores.items(), key=lambda x: x[1], reverse=True)
+    raw_top3 = [n for n, _ in top3_ranked[:3]]
+
+    # Anti-repetición exacta del último sorteo
+    if set(raw_top3) == last_draw and len(top12) > 3:
+        replacement = next((x for x in top12 if x not in raw_top3), top12[3])
+        raw_top3 = raw_top3[:2] + [replacement]
+
+    # Asegurar algo de diversidad por decena si quedaron 3 de la misma zona
+    decades_top3 = [_decade(x) for x in raw_top3]
+    if len(set(decades_top3)) == 1:
+        replacement = next((x for x in top12[3:] if _decade(x) != decades_top3[0]), None)
+        if replacement:
+            raw_top3 = raw_top3[:2] + [replacement]
+
+    top3 = raw_top3
+
+    # métricas
+    best_signal = float(ranked[0][1])
+
+    # a11 útil: mezcla de gaps y presión reciente
+    best_a11 = sum(1 for n in top12[:6] if gaps.get(n, window_used) >= 6)
+
+    # alert calibrado:
+    # mejor no “siempre true”. Buscamos edge real.
+    top5_avg = sum(v for _, v in ranked[:5]) / 5.0
+    top12_avg = sum(v for _, v in ranked[:12]) / 12.0
+    separation = top5_avg - top12_avg
+    ok_alert = best_signal > 0.90 and separation > 0.12
+
+    # régimen
+    avg_recent_heat = sum(recent8.values()) / max(1, len(recent8))
+    if avg_recent_heat >= 1.7:
         regime = "MOMENTUM"
-    elif avg_momentum < 1:
+    elif avg_gap >= window_used * 0.45:
         regime = "MEAN_REVERSION"
     else:
         regime = "MIXED"
 
     debug = {
-        "window_used": window,
+        "window_used": window_used,
         "regime": regime,
-        "unique_numbers": len(scores),
+        "unique_numbers": len([n for n, v in scores.items() if v > 0]),
+        "top5_avg": round(top5_avg, 6),
+        "top12_avg": round(top12_avg, 6),
+        "separation": round(separation, 6),
     }
 
     return ModelOutput(
         top3=top3,
         top12=top12,
-        best_signal=best_signal,
+        best_signal=round(best_signal, 6),
         best_a11=best_a11,
         ok_alert=ok_alert,
-        debug=debug
+        debug=debug,
     )
