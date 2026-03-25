@@ -248,19 +248,30 @@ def run_picks(history: List[Row], fecha: str, slot: str):
     if pick_already_logged(target_id, slot):
         return
 
-    draws: List[Tuple[str, str, str]] = [(r.primero, r.segundo, r.tercero) for r in history if r.sorteo == target_sorteo]
+    draws: List[Tuple[str, str, str]] = [
+        (r.primero, r.segundo, r.tercero)
+        for r in history
+        if r.sorteo == target_sorteo
+    ]
+
     if len(draws) < 50:
         send_telegram_message(f"⚠️ LN {title}: historial insuficiente ({len(draws)} filas).", token, chat_id)
         return
 
     try:
-        out = rank_numbers_from_draws(draws)
+        # ✅ Activa MID -> NOCHE solo cuando aplica
+        if target_label == "NIGHT" and mid_today:
+            out = rank_numbers_from_draws(draws, window_n=s.window_n, mid_today=mid_today)
+        else:
+            out = rank_numbers_from_draws(draws, window_n=s.window_n)
     except Exception as e:
         send_telegram_message(f"⚠️ LN {title}: error modelo: {e}", token, chat_id)
         return
 
     same_day_mid_present = mid_today is not None
     mid_today_nums = ",".join(mid_today) if mid_today else ""
+
+    rows_used = out.debug.get("window_used", min(len(draws), s.window_n)) if isinstance(out.debug, dict) else min(len(draws), s.window_n)
 
     row = {
         "ts_run": now_iso_utc(),
@@ -272,11 +283,11 @@ def run_picks(history: List[Row], fecha: str, slot: str):
         "best_signal": out.best_signal,
         "best_a11": out.best_a11,
         "ok_alert": int(out.ok_alert),
-        "source_rows_hist_used": min(len(draws), s.window_n),
+        "source_rows_hist_used": rows_used,
         "same_day_mid_present": int(same_day_mid_present),
         "mid_today_nums": mid_today_nums,
         "debug_json": str(out.debug),
-        "model_version": "LN-quiniela-v1",
+        "model_version": "LN-quiniela-v3-mid-night",
     }
     append_csv("data/picks_log.csv", row, PICKS_HEADER)
 
@@ -287,7 +298,7 @@ def run_picks(history: List[Row], fecha: str, slot: str):
         f"📌 <b>Top12</b>: {', '.join(out.top12)}\n\n"
         f"🧩 same_day_mid_present: {same_day_mid_present}\n"
         f"🧠 best_signal: {out.best_signal:.6f} | a11: {out.best_a11} | alert: {out.ok_alert}\n"
-        f"📊 rows_used: {min(len(draws), s.window_n)}\n"
+        f"📊 rows_used: {rows_used}\n"
     )
     send_telegram_message(msg, token, chat_id)
 
