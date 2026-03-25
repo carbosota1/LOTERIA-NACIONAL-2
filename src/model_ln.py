@@ -242,7 +242,7 @@ def rank_numbers_from_draws(
         base = scores[num]
 
         # empujar números que no salieron en el último sorteo
-        novelty = 0.18 if num not in last_draw else -0.12
+        novelty = 0.22 if num not in last_draw else -0.12
 
         # empujar por gap de corto plazo
         gap_short = min(gaps.get(num, window_used), 12) / 12.0
@@ -285,7 +285,7 @@ def rank_numbers_from_draws(
     top5_avg = sum(v for _, v in ranked[:5]) / 5.0
     top12_avg = sum(v for _, v in ranked[:12]) / 12.0
     separation = top5_avg - top12_avg
-    ok_alert = best_signal > 0.90 and separation > 0.12
+    ok_alert = separation > 0.08
 
     # régimen
     avg_recent_heat = sum(recent8.values()) / max(1, len(recent8))
