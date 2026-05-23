@@ -1,5 +1,8 @@
 name: LN System
 on:
+  push:
+    paths-ignore:
+      - '**'
   schedule:
     - cron: "0 17 * * *"   # 1PM RD -> PICKS
     - cron: "0 19 * * *"   # 3PM RD -> CHECK
