@@ -74,4 +74,5 @@ jobs:
           git config user.email "gitea-actions@noreply.local"
           git add data/*.xlsx data/*.csv || true
           git commit -m "LN update (history/logs)" || echo "No changes"
+          git pull --rebase origin main || git pull --rebase origin master
           git push
