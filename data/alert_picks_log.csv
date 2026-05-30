@@ -1,0 +1,2 @@
+ts_run,schedule_slot,target_draw_id,top3,top12,best_signal,best_a11,ok_alert,nivel_alerta,should_play,priority_positions,numbers_to_play,obs_dominant,good_day,rows_used,model_version
+2026-05-30T22:48:45Z,manual,LN|2026-05-30|NIGHT,"17,40,82","17,65,82,40,27,47,21,78,96,54,79,84",1.98072,3,1,SKIP,0,,,,0,120,LN-alert-v1
