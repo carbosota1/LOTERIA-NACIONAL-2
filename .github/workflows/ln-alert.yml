@@ -1,0 +1,86 @@
+name: LN Alert System
+
+on:
+  push:
+    paths-ignore:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode: picks | check | sync"
+        required: true
+        default: "picks"
+      slot:
+        description: "Slot: 13:15 | 15:15 | 16:15 | 22:15 | manual"
+        required: true
+        default: "manual"
+      date:
+        description: "Fecha opcional YYYY-MM-DD (vacío = hoy RD)"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Decide job
+        id: decide
+        shell: bash
+        run: |
+          S="${{ github.event.schedule }}"
+          if [ -n "$S" ]; then
+            case "$S" in
+              "15 17 * * *")
+                echo "mode=picks"  >> $GITHUB_OUTPUT
+                echo "slot=13:15"  >> $GITHUB_OUTPUT
+                echo "date="       >> $GITHUB_OUTPUT ;;
+              "15 19 * * *")
+                echo "mode=check"  >> $GITHUB_OUTPUT
+                echo "slot=15:15"  >> $GITHUB_OUTPUT
+                echo "date="       >> $GITHUB_OUTPUT ;;
+              "15 20 * * *")
+                echo "mode=picks"  >> $GITHUB_OUTPUT
+                echo "slot=16:15"  >> $GITHUB_OUTPUT
+                echo "date="       >> $GITHUB_OUTPUT ;;
+              "15 2 * * *")
+                echo "mode=sync"   >> $GITHUB_OUTPUT
+                echo "slot=22:15"  >> $GITHUB_OUTPUT
+                echo "date="       >> $GITHUB_OUTPUT ;;
+              *)
+                echo "mode=sync"   >> $GITHUB_OUTPUT
+                echo "slot=manual" >> $GITHUB_OUTPUT
+                echo "date="       >> $GITHUB_OUTPUT ;;
+            esac
+          else
+            echo "mode=${{ inputs.mode }}" >> $GITHUB_OUTPUT
+            echo "slot=${{ inputs.slot }}" >> $GITHUB_OUTPUT
+            echo "date=${{ inputs.date }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Alert System
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python src/alert_runner.py \
+            --mode "${{ steps.decide.outputs.mode }}" \
+            --slot "${{ steps.decide.outputs.slot }}" \
+            --date "${{ steps.decide.outputs.date }}"
+
+      - name: Commit alert logs
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "github-actions@noreply.github.com"
+          mkdir -p data
+          git add -f data/alert_picks_log.csv || true
+          git add -f data/alert_performance_log.csv || true
+          git commit -m "Alert update (picks/perf logs)" || echo "No changes"
+          git pull --rebase origin main || git pull --rebase origin master
+          git push
