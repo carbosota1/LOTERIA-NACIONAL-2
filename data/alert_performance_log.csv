@@ -1,0 +1,2 @@
+draw_id,picked_from_ts_run,top3,top12,observed_n1,observed_n2,observed_n3,hits_top3_count,hits_top12_count,hit_any_top3,hit_any_top12,hit_positions_top12,best_signal,best_a11,ok_alert,nivel_alerta,should_play
+LN|2026-05-30|NIGHT,2026-05-30T22:48:45Z,"17,40,82","17,65,82,40,27,47,21,78,96,54,79,84",49,37,87,0,0,0,0,,1.98072,3,1,SKIP,0
