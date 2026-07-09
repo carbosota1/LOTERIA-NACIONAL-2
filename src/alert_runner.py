@@ -1,9 +1,6 @@
 # ============================================================
 # FILE: src/alert_runner.py
-# LN ALERT SYSTEM — Runner principal
-# Corre en paralelo al sistema existente.
-# Usa el mismo history XLSX (solo lectura).
-# Escribe sus propios CSVs: alert_picks_log / alert_performance_log.
+# LN ALERT SYSTEM — Runner con motor dinámico
 # ============================================================
 import argparse
 import csv
@@ -18,9 +15,8 @@ from alert_config import (
     NIGHT_PUBLISH_HOUR, NIGHT_PUBLISH_MIN,
     PUBLISH_BUFFER_MIN,
 )
-from alert_engine import evaluate, build_message
+from alert_engine import DynamicAlertEngine, build_message
 
-# Reutilizamos los módulos del sistema principal (sin modificarlos)
 from telegram_bot import get_telegram_creds, send_telegram_message
 from store import append_csv, now_iso_utc
 from ln_history_xlsx import read_history_xlsx, Row
@@ -29,15 +25,13 @@ from performance import score_hits
 from ln_scraper import get_result
 
 
-# ── Headers CSV propios ──────────────────────────────────────
 ALERT_PICKS_HEADER = [
     "ts_run", "schedule_slot", "target_draw_id",
     "top3", "top12",
     "best_signal", "best_a11", "ok_alert",
-    "nivel_alerta", "should_play",
-    "priority_positions", "numbers_to_play",
-    "obs_dominant", "good_day",
-    "rows_used", "model_version",
+    "nivel_alerta", "should_play", "hit12_pct", "n_samples",
+    "signal_bin", "priority_positions", "numbers_to_play",
+    "obs_dominant", "good_day", "rows_used", "model_version",
 ]
 
 ALERT_PERF_HEADER = [
@@ -51,14 +45,11 @@ ALERT_PERF_HEADER = [
 ]
 
 
-# ── Helpers ──────────────────────────────────────────────────
 def _draw_id(fecha: str, label: str) -> str:
     return f"LN|{fecha}|{label}"
 
-
 def _today_ymd() -> str:
     return datetime.now(TZ_RD).date().strftime("%Y-%m-%d")
-
 
 def _safe_date(date_str: str) -> str:
     date_str = (date_str or "").strip()
@@ -66,7 +57,6 @@ def _safe_date(date_str: str) -> str:
         return _today_ymd()
     datetime.strptime(date_str, "%Y-%m-%d")
     return date_str
-
 
 def _ready_by_time(draw_title: str, fecha: str) -> bool:
     today = datetime.now(TZ_RD).date()
@@ -83,8 +73,7 @@ def _ready_by_time(draw_title: str, fecha: str) -> bool:
         return now >= pub
     return True
 
-
-def _try_get_result(draw_title: str, fecha: str) -> Optional[Tuple[str, str, str]]:
+def _try_get_result(draw_title: str, fecha: str):
     if not _ready_by_time(draw_title, fecha):
         return None
     try:
@@ -95,7 +84,6 @@ def _try_get_result(draw_title: str, fecha: str) -> Optional[Tuple[str, str, str
             return None
         raise
 
-
 def _csv_has_row(path: str, match: dict) -> bool:
     if not os.path.exists(path):
         return False
@@ -105,12 +93,7 @@ def _csv_has_row(path: str, match: dict) -> bool:
                 return True
     return False
 
-
-def _decide_target(fecha: str) -> Tuple[str, str, Optional[Tuple]]:
-    """
-    Devuelve (turno_label, draw_title, mid_today_nums_or_None).
-    turno_label = "MID" | "NIGHT" | "DONE"
-    """
+def _decide_target(fecha: str):
     mid = _try_get_result(DRAW_GANAMAS, fecha)
     if mid is None:
         return ("MID", DRAW_GANAMAS, None)
@@ -120,23 +103,17 @@ def _decide_target(fecha: str) -> Tuple[str, str, Optional[Tuple]]:
     return ("DONE", "", mid)
 
 
-# ── Modo picks ───────────────────────────────────────────────
 def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
     token, chat_id = get_telegram_creds(s.telegram_bot_token_env, s.telegram_chat_id_env)
 
     target_label, target_sorteo, mid_today = _decide_target(fecha)
-
     if target_label == "DONE":
-        # Silencioso — el sistema principal ya notificó
         return
 
     target_id = _draw_id(fecha, target_label)
-
-    # No duplicar picks para el mismo sorteo+slot
-    if _csv_has_row(s.picks_log_path, {"target_draw_id": target_id, "schedule_slot": slot}):
+    if _csv_has_row(s.picks_log_path, {"target_draw_id": target_id}):
         return
 
-    # Cargar history (solo lectura)
     history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
     draws: List[Tuple[str, str, str]] = [
         (r.primero, r.segundo, r.tercero)
@@ -165,8 +142,9 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
         else min(len(draws), s.window_n)
     )
 
-    # ── Decisión de alerta inteligente ──────────────────────
-    decision = evaluate(
+    # ── Motor dinámico ────────────────────────────────────────
+    engine   = DynamicAlertEngine(s.perf_log_path)
+    decision = engine.evaluate(
         best_a11=out.best_a11,
         best_signal=out.best_signal,
         ok_alert=out.ok_alert,
@@ -176,7 +154,7 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
         fecha=fecha,
     )
 
-    # ── Log CSV ─────────────────────────────────────────────
+    # ── Log CSV ───────────────────────────────────────────────
     append_csv(s.picks_log_path, {
         "ts_run":             now_iso_utc(),
         "schedule_slot":      slot,
@@ -188,15 +166,18 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
         "ok_alert":           int(out.ok_alert),
         "nivel_alerta":       decision.nivel,
         "should_play":        int(decision.should_play),
+        "hit12_pct":          decision.hit12_pct,
+        "n_samples":          decision.n_samples,
+        "signal_bin":         decision.signal_bin,
         "priority_positions": ",".join(map(str, decision.priority_positions)),
         "numbers_to_play":    ",".join(decision.numbers_to_play),
         "obs_dominant":       decision.obs_dominant,
         "good_day":           int(decision.good_day),
         "rows_used":          rows_used,
-        "model_version":      "LN-alert-v1",
+        "model_version":      "LN-alert-v2-dynamic",
     }, ALERT_PICKS_HEADER)
 
-    # ── Telegram ─────────────────────────────────────────────
+    # ── Telegram ──────────────────────────────────────────────
     msg = build_message(
         decision=decision,
         fecha=fecha,
@@ -210,7 +191,6 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
     send_telegram_message(msg, token, chat_id)
 
 
-# ── Modo check / performance ─────────────────────────────────
 def run_performance(s: AlertSettings) -> None:
     if not os.path.exists(s.picks_log_path):
         return
@@ -234,9 +214,9 @@ def run_performance(s: AlertSettings) -> None:
             continue
 
         observed = results[did]
-        top3  = p["top3"].split(",")  if p.get("top3")  else []
-        top12 = p["top12"].split(",") if p.get("top12") else []
-        stats = score_hits(top3, top12, observed)
+        top3     = p["top3"].split(",")  if p.get("top3")  else []
+        top12    = p["top12"].split(",") if p.get("top12") else []
+        stats    = score_hits(top3, top12, observed)
 
         append_csv(s.perf_log_path, {
             "draw_id":            did,
@@ -255,21 +235,12 @@ def run_performance(s: AlertSettings) -> None:
         }, ALERT_PERF_HEADER)
 
 
-# ── Modo sync ────────────────────────────────────────────────
 def run_sync(s: AlertSettings, fecha: str) -> None:
-    """
-    Solo corre performance. El sync del history lo hace el sistema principal.
-    """
-    run_performance(s)
-
-    # También performance de ayer por si quedó pendiente
-    ayer = (datetime.strptime(fecha, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
     run_performance(s)
 
 
-# ── Entry point ──────────────────────────────────────────────
 def main() -> None:
-    ap = argparse.ArgumentParser(description="LN Alert System")
+    ap = argparse.ArgumentParser(description="LN Alert System v2 Dynamic")
     ap.add_argument("--mode", choices=["picks", "check", "sync"], required=True)
     ap.add_argument("--slot", default="manual")
     ap.add_argument("--date", default="")
