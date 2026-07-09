@@ -1,6 +1,8 @@
 # ============================================================
 # FILE: src/alert_runner.py
-# LN ALERT SYSTEM — Runner con motor dinámico
+# LN ALERT SYSTEM — Runner v3 completo
+# Lee ambos performance logs.
+# Sync nocturno manda resumen Telegram.
 # ============================================================
 import argparse
 import csv
@@ -19,7 +21,7 @@ from alert_engine import DynamicAlertEngine, build_message
 
 from telegram_bot import get_telegram_creds, send_telegram_message
 from store import append_csv, now_iso_utc
-from ln_history_xlsx import read_history_xlsx, Row
+from ln_history_xlsx import read_history_xlsx
 from model_ln import rank_numbers_from_draws
 from performance import score_hits
 from ln_scraper import get_result
@@ -45,6 +47,7 @@ ALERT_PERF_HEADER = [
 ]
 
 
+# ── Helpers ───────────────────────────────────────────────────
 def _draw_id(fecha: str, label: str) -> str:
     return f"LN|{fecha}|{label}"
 
@@ -102,7 +105,15 @@ def _decide_target(fecha: str):
         return ("NIGHT", DRAW_NOCHE, mid)
     return ("DONE", "", mid)
 
+def _make_engine(s: AlertSettings) -> DynamicAlertEngine:
+    """Crea el motor leyendo ambos performance logs."""
+    return DynamicAlertEngine(
+        main_perf_path=s.main_perf_log_path,
+        alert_perf_path=s.perf_log_path,
+    )
 
+
+# ── Modo picks ────────────────────────────────────────────────
 def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
     token, chat_id = get_telegram_creds(s.telegram_bot_token_env, s.telegram_chat_id_env)
 
@@ -138,12 +149,11 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
 
     rows_used = (
         out.debug.get("window_used", min(len(draws), s.window_n))
-        if isinstance(out.debug, dict)
-        else min(len(draws), s.window_n)
+        if isinstance(out.debug, dict) else min(len(draws), s.window_n)
     )
 
-    # ── Motor dinámico ────────────────────────────────────────
-    engine   = DynamicAlertEngine(s.perf_log_path)
+    # ── Motor dinámico (usa ambos logs) ──────────────────────
+    engine   = _make_engine(s)
     decision = engine.evaluate(
         best_a11=out.best_a11,
         best_signal=out.best_signal,
@@ -174,7 +184,7 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
         "obs_dominant":       decision.obs_dominant,
         "good_day":           int(decision.good_day),
         "rows_used":          rows_used,
-        "model_version":      "LN-alert-v2-dynamic",
+        "model_version":      "LN-alert-v3-dynamic",
     }, ALERT_PICKS_HEADER)
 
     # ── Telegram ──────────────────────────────────────────────
@@ -191,9 +201,14 @@ def run_picks(s: AlertSettings, fecha: str, slot: str) -> None:
     send_telegram_message(msg, token, chat_id)
 
 
-def run_performance(s: AlertSettings) -> None:
+# ── Modo performance ──────────────────────────────────────────
+def run_performance(s: AlertSettings) -> List[dict]:
+    """
+    Compara picks vs resultados reales.
+    Devuelve lista de nuevos registros procesados (para el sync).
+    """
     if not os.path.exists(s.picks_log_path):
-        return
+        return []
 
     history = read_history_xlsx(s.history_xlsx_path, s.history_sheet_name)
     results = {}
@@ -205,6 +220,7 @@ def run_performance(s: AlertSettings) -> None:
     with open(s.picks_log_path, "r", encoding="utf-8") as f:
         picks = list(csv.DictReader(f))
 
+    new_records = []
     for p in picks:
         did    = p.get("target_draw_id", "")
         ts_run = p.get("ts_run", "")
@@ -218,7 +234,7 @@ def run_performance(s: AlertSettings) -> None:
         top12    = p["top12"].split(",") if p.get("top12") else []
         stats    = score_hits(top3, top12, observed)
 
-        append_csv(s.perf_log_path, {
+        record = {
             "draw_id":            did,
             "picked_from_ts_run": ts_run,
             "top3":               p.get("top3", ""),
@@ -232,15 +248,50 @@ def run_performance(s: AlertSettings) -> None:
             "ok_alert":           p.get("ok_alert", ""),
             "nivel_alerta":       p.get("nivel_alerta", ""),
             "should_play":        p.get("should_play", ""),
-        }, ALERT_PERF_HEADER)
+        }
+        append_csv(s.perf_log_path, record, ALERT_PERF_HEADER)
+        new_records.append(record)
+
+    return new_records
 
 
+# ── Modo sync ─────────────────────────────────────────────────
 def run_sync(s: AlertSettings, fecha: str) -> None:
-    run_performance(s)
+    token, chat_id = get_telegram_creds(s.telegram_bot_token_env, s.telegram_chat_id_env)
+
+    # 1) Procesar performance
+    new_records = run_performance(s)
+
+    if not new_records:
+        return
+
+    # 2) Reconstruir motor con datos ya actualizados
+    engine = _make_engine(s)
+
+    # 3) Preparar datos para el resumen
+    summary_data = []
+    for rec in new_records:
+        summary_data.append({
+            "draw_id":           rec["draw_id"],
+            "nivel_alerta":      rec.get("nivel_alerta", "?"),
+            "should_play":       rec.get("should_play", "0"),
+            "hit_any_top12":     rec.get("hit_any_top12", 0),
+            "hit_any_top3":      rec.get("hit_any_top3", 0),
+            "hit_positions_top12": rec.get("hit_positions_top12", ""),
+            "observed_n1":       rec.get("observed_n1", "?"),
+            "observed_n2":       rec.get("observed_n2", "?"),
+            "observed_n3":       rec.get("observed_n3", "?"),
+        })
+
+    # 4) Mandar resumen Telegram
+    msg = engine.sync_summary(summary_data)
+    if msg:
+        send_telegram_message(msg, token, chat_id)
 
 
+# ── Entry point ───────────────────────────────────────────────
 def main() -> None:
-    ap = argparse.ArgumentParser(description="LN Alert System v2 Dynamic")
+    ap = argparse.ArgumentParser(description="LN Alert System v3 Dynamic")
     ap.add_argument("--mode", choices=["picks", "check", "sync"], required=True)
     ap.add_argument("--slot", default="manual")
     ap.add_argument("--date", default="")
