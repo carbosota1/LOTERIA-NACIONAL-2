@@ -1,10 +1,7 @@
 # ============================================================
 # FILE: src/alert_engine.py
-# LN ALERT SYSTEM — Motor de aprendizaje dinámico v3
-#
-# Lee AMBOS performance logs (principal + alert) para máxima data.
-# Calcula todo en tiempo real con peso mayor a lo reciente.
-# Manda resumen en el sync nocturno.
+# LN ALERT SYSTEM — Motor de aprendizaje dinámico v3.1
+# Fix: _hit_rate devuelve n correcto cuando usa broad.
 # ============================================================
 from __future__ import annotations
 
@@ -16,18 +13,16 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 
-# ── Constantes ────────────────────────────────────────────────
 SIGNAL_BINS   = [0, 1.5, 1.7, 1.8, 1.9, 2.0, 2.1, 2.3, 2.5, 3.0, 99.0]
 SIGNAL_LABELS = [
     "<1.5","1.5-1.7","1.7-1.8","1.8-1.9",
     "1.9-2.0","2.0-2.1","2.1-2.3","2.3-2.5","2.5-3.0",">3.0",
 ]
 
-MIN_SAMPLES      = 5      # mínimo para confiar en la regla
-DECAY            = 0.92   # peso decreciente (más bajo = más peso a lo reciente)
-DEFAULT_HIT_RATE = 0.25   # conservador cuando no hay data
+MIN_SAMPLES      = 5
+DECAY            = 0.92
+DEFAULT_HIT_RATE = 0.25
 
-# Umbrales de nivel
 UMBRAL_FUEGO    = 0.50
 UMBRAL_VERDE    = 0.35
 UMBRAL_AMARILLO = 0.18
@@ -47,7 +42,6 @@ _EMOJI = {
 }
 
 
-# ── Resultado de decisión ─────────────────────────────────────
 @dataclass
 class AlertDecision:
     should_play: bool
@@ -65,7 +59,6 @@ class AlertDecision:
     signal_bin: str
 
 
-# ── Helpers ───────────────────────────────────────────────────
 def _signal_bin(signal: float) -> str:
     for i in range(len(SIGNAL_BINS) - 1):
         if SIGNAL_BINS[i] <= signal < SIGNAL_BINS[i + 1]:
@@ -85,9 +78,7 @@ def _nivel_from_rate(rate: float, n: int) -> str:
     return NIVEL_SKIP
 
 
-# ── Cargador de logs ──────────────────────────────────────────
 def _load_log(path: str) -> List[dict]:
-    """Carga un performance log (principal o alert) normalizando campos."""
     if not os.path.exists(path):
         return []
     rows = []
@@ -129,72 +120,73 @@ def _load_log(path: str) -> List[dict]:
     return rows
 
 
-# ── Motor dinámico ────────────────────────────────────────────
 class DynamicAlertEngine:
-    """
-    Aprende de ambos performance logs en cada ejecución.
-    performance_log.csv  → historial completo del sistema principal
-    alert_performance_log.csv → historial del alert system
-    Los duplicados (mismo draw_id) se deduplicан conservando uno.
-    """
 
     def __init__(self, main_perf_path: str, alert_perf_path: str):
         main_rows  = _load_log(main_perf_path)
         alert_rows = _load_log(alert_perf_path)
 
-        # Deduplicar por draw_id — preferir alert (tiene nivel_alerta)
+        # Deduplicar — alert tiene prioridad (tiene nivel_alerta)
         seen: Dict[str, dict] = {}
         for r in main_rows:
             seen[r["_draw_id"]] = r
         for r in alert_rows:
-            seen[r["_draw_id"]] = r   # alert sobreescribe si existe
+            seen[r["_draw_id"]] = r
 
-        self._rows   = list(seen.values())
+        self._rows    = list(seen.values())
         self._n_total = len(self._rows)
 
-    # ── Peso decreciente ──────────────────────────────────────
     def _weighted(self, rows: List[dict]) -> List[Tuple[dict, float]]:
         sorted_rows = sorted(rows, key=lambda r: r["_ts"])
         n = len(sorted_rows)
         return [(r, DECAY ** (n - 1 - i)) for i, r in enumerate(sorted_rows)]
 
-    # ── Hit rate ponderado ────────────────────────────────────
     def _hit_rate(
         self, a11: int, turno: str, sig_bin: str, field: str = "_hit12"
     ) -> Tuple[float, int]:
-
-        # Filtro exacto (a11 + turno + bin)
+        """
+        Devuelve (hit_rate_ponderado, n_efectivo).
+        n_efectivo = cuántas muestras se usaron realmente para calcular.
+        FIX v3.1: cuando usa broad, devuelve len(broad) no len(exact).
+        """
         exact = [
             r for r in self._rows
             if r["_a11"] == a11 and r["_turno"] == turno
             and r["_sig_bin"] == sig_bin and r["_ok_alert"] == 1
         ]
+
+        # ── Filtro exacto con suficiente data ────────────────
         if len(exact) >= MIN_SAMPLES:
             wrows   = self._weighted(exact)
             total_w = sum(w for _, w in wrows)
             hit_w   = sum(w for r, w in wrows if r[field] == 1)
             return (hit_w / total_w if total_w > 0 else 0.0, len(exact))
 
-        # Ampliar a (a11 + turno)
+        # ── Ampliar a (a11 + turno) ──────────────────────────
         broad = [
             r for r in self._rows
             if r["_a11"] == a11 and r["_turno"] == turno and r["_ok_alert"] == 1
         ]
+
         if len(broad) >= MIN_SAMPLES:
-            wrows     = self._weighted(broad)
-            total_w   = sum(w for _, w in wrows)
-            hit_w     = sum(w for r, w in wrows if r[field] == 1)
+            wrows      = self._weighted(broad)
+            total_w    = sum(w for _, w in wrows)
+            hit_w      = sum(w for r, w in wrows if r[field] == 1)
             broad_rate = hit_w / total_w if total_w > 0 else DEFAULT_HIT_RATE
+
+            # Blend: si hay exactos, mezclar; si no, usar broad puro
             if exact:
                 ex_rate = sum(r[field] for r in exact) / len(exact)
-                blended = 0.7 * broad_rate + 0.3 * ex_rate
+                rate    = 0.7 * broad_rate + 0.3 * ex_rate
             else:
-                blended = broad_rate
-            return (blended, len(exact))
+                rate = broad_rate
 
+            # FIX: reportar len(broad) para que el nivel sea correcto
+            return (rate, len(broad))
+
+        # ── Sin data suficiente ──────────────────────────────
         return (DEFAULT_HIT_RATE, len(exact))
 
-    # ── Mejores días ──────────────────────────────────────────
     def _best_days(self, a11: int, turno: str) -> List[str]:
         rows = [r for r in self._rows if r["_a11"] == a11 and r["_turno"] == turno]
         if len(rows) < 10:
@@ -208,7 +200,6 @@ class DynamicAlertEngine:
             if len(hits) >= 3 and sum(hits) / len(hits) >= 0.38
         ]
 
-    # ── Posiciones prioritarias ───────────────────────────────
     def _priority_positions(self, a11: int, turno: str) -> List[int]:
         hits = [
             r for r in self._rows
@@ -223,7 +214,6 @@ class DynamicAlertEngine:
                     pc[r["_top12"].index(obs) + 1] += 1
         return [p for p, _ in pc.most_common(6)] if pc else [12, 11, 10, 9, 8, 7]
 
-    # ── Número observado dominante ────────────────────────────
     def _obs_dominant(self, a11: int, turno: str) -> str:
         hits = [
             r for r in self._rows
@@ -243,7 +233,6 @@ class DynamicAlertEngine:
         if n3 == mx: dominant.append("n3")
         return "/".join(dominant)
 
-    # ── Evaluación principal ──────────────────────────────────
     def evaluate(
         self,
         best_a11: int,
@@ -266,12 +255,11 @@ class DynamicAlertEngine:
                 signal_bin="",
             )
 
-        sig_bin       = _signal_bin(best_signal)
-        hr12, n_exact = self._hit_rate(best_a11, turno, sig_bin, "_hit12")
-        hr3,  _       = self._hit_rate(best_a11, turno, sig_bin, "_hit3")
-        nivel         = _nivel_from_rate(hr12, n_exact)
+        sig_bin        = _signal_bin(best_signal)
+        hr12, n_efectivo = self._hit_rate(best_a11, turno, sig_bin, "_hit12")
+        hr3,  _          = self._hit_rate(best_a11, turno, sig_bin, "_hit3")
+        nivel            = _nivel_from_rate(hr12, n_efectivo)
 
-        # Día de semana
         good_day = False
         day_name = ""
         if fecha:
@@ -284,9 +272,8 @@ class DynamicAlertEngine:
         prio_pos  = self._priority_positions(best_a11, turno)
         obs_dom   = self._obs_dominant(best_a11, turno)
         nums_play = [top12[p - 1] for p in prio_pos if 0 < p <= len(top12)]
-        play_top3 = hr3 >= 0.20 and n_exact >= MIN_SAMPLES
+        play_top3 = hr3 >= 0.20 and n_efectivo >= MIN_SAMPLES
 
-        # Decisión
         if nivel == NIVEL_SKIP:
             should_play = False
         elif nivel == NIVEL_APRENDIENDO:
@@ -297,9 +284,9 @@ class DynamicAlertEngine:
             should_play = good_day or hr12 >= 0.30
 
         data_note = (
-            f"{int(hr12*100)}% hit real ({n_exact} muestras)"
-            if n_exact >= MIN_SAMPLES
-            else f"Aprendiendo ({n_exact} muestras, mín {MIN_SAMPLES})"
+            f"{int(hr12*100)}% hit real ({n_efectivo} muestras)"
+            if n_efectivo >= MIN_SAMPLES
+            else f"Aprendiendo ({n_efectivo} muestras, mín {MIN_SAMPLES})"
         )
         day_tag = (
             f" | {day_name} ✅ día favorable" if good_day
@@ -314,7 +301,7 @@ class DynamicAlertEngine:
             should_play=should_play, nivel=nivel,
             hit12_pct=round(hr12 * 100, 1),
             hit3_pct=round(hr3 * 100, 1),
-            n_samples=n_exact,
+            n_samples=n_efectivo,
             play_top3=play_top3,
             priority_positions=prio_pos,
             numbers_to_play=nums_play,
@@ -323,27 +310,17 @@ class DynamicAlertEngine:
             reason=reason, signal_bin=sig_bin,
         )
 
-    # ── Resumen para sync ─────────────────────────────────────
     def sync_summary(self, new_results: List[dict]) -> str:
-        """
-        Genera mensaje Telegram con resumen del sync nocturno.
-        new_results: lista de dicts con keys:
-          draw_id, nivel_alerta, should_play,
-          hit_any_top12, hit_any_top3, hit_positions_top12,
-          observed_n1, observed_n2, observed_n3
-        """
         if not new_results:
             return ""
 
-        total   = self._n_total
+        total      = self._n_total
         global_hit = (
             round(sum(r["_hit12"] for r in self._rows) / total * 100, 1)
             if total > 0 else 0
         )
 
-        lines = [
-            f"📊 <b>[ALERT SYS] Sync — {datetime.utcnow().strftime('%Y-%m-%d')}</b>\n"
-        ]
+        lines = [f"📊 <b>[ALERT SYS] Sync — {datetime.utcnow().strftime('%Y-%m-%d')}</b>\n"]
 
         for res in new_results:
             turno_label = "Gana Más" if "|MID" in res["draw_id"] else "Noche"
@@ -354,9 +331,9 @@ class DynamicAlertEngine:
             pos    = res.get("hit_positions_top12", "")
             obs    = f"{res.get('observed_n1','?')}, {res.get('observed_n2','?')}, {res.get('observed_n3','?')}"
 
-            jugado = "▶️ Jugado" if play else "⏸ No jugado"
+            jugado      = "▶️ Jugado" if play else "⏸ No jugado"
             result_icon = "✅" if hit12 else "❌"
-            hit_note = f"pos {pos}" if (hit12 and pos) else ("top3 ✅" if hit3 else "no acertó")
+            hit_note    = f"pos {pos}" if (hit12 and pos) else ("top3 ✅" if hit3 else "no acertó")
 
             lines.append(
                 f"🎯 <b>{turno_label}</b> | {jugado} | Nivel: {nivel}\n"
@@ -368,7 +345,6 @@ class DynamicAlertEngine:
         return "\n".join(lines)
 
 
-# ── Formateador Telegram (picks) ──────────────────────────────
 def build_message(
     decision: AlertDecision,
     fecha: str,
