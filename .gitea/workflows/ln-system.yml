@@ -1,14 +1,13 @@
-name: LN Alert System
-
+name: LN System
 on:
   push:
     paths-ignore:
       - '**'
   schedule:
-    - cron: "15 17 * * *"   # 1:15 PM RD → PICKS MID
-    - cron: "15 19 * * *"   # 3:15 PM RD → CHECK
-    - cron: "15 20 * * *"   # 4:15 PM RD → PICKS NIGHT
-    - cron: "15 2  * * *"   # 10:15 PM RD → SYNC
+    - cron: "0 17 * * *"
+    - cron: "0 19 * * *"
+    - cron: "0 20 * * *"
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -16,14 +15,13 @@ on:
         required: true
         default: "picks"
       slot:
-        description: "Slot: 13:15 | 15:15 | 16:15 | 22:15 | manual"
+        description: "Slot label: 13:00 | 15:00 | 16:00 | 22:00 | manual"
         required: true
         default: "manual"
       date:
-        description: "Fecha opcional YYYY-MM-DD (vacío = hoy RD)"
+        description: "Optional date YYYY-MM-DD (leave empty for today RD)"
         required: false
         default: ""
-
 jobs:
   run:
     runs-on: ubuntu-22.04
@@ -31,60 +29,52 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITEA_TOKEN }}
-
       - name: Install deps
-        run: pip install -r requirements.txt
-
+        run: |
+          pip install -r requirements.txt
       - name: Decide job
         id: decide
         shell: bash
         run: |
           S="${{ github.event.schedule }}"
+          echo "schedule=$S"
           if [ -n "$S" ]; then
-            if [ "$S" = "15 17 * * *" ]; then
+            if [ "$S" = "0 17 * * *" ]; then
               echo "mode=picks" >> $GITHUB_OUTPUT
-              echo "slot=13:15" >> $GITHUB_OUTPUT
-              echo "date="      >> $GITHUB_OUTPUT
-            elif [ "$S" = "15 19 * * *" ]; then
+              echo "slot=13:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            elif [ "$S" = "0 19 * * *" ]; then
               echo "mode=check" >> $GITHUB_OUTPUT
-              echo "slot=15:15" >> $GITHUB_OUTPUT
-              echo "date="      >> $GITHUB_OUTPUT
-            elif [ "$S" = "15 20 * * *" ]; then
+              echo "slot=15:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            elif [ "$S" = "0 20 * * *" ]; then
               echo "mode=picks" >> $GITHUB_OUTPUT
-              echo "slot=16:15" >> $GITHUB_OUTPUT
-              echo "date="      >> $GITHUB_OUTPUT
-            elif [ "$S" = "15 2 * * *" ]; then
-              echo "mode=sync"  >> $GITHUB_OUTPUT
-              echo "slot=22:15" >> $GITHUB_OUTPUT
-              echo "date="      >> $GITHUB_OUTPUT
+              echo "slot=16:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
+            elif [ "$S" = "0 2 * * *" ]; then
+              echo "mode=sync" >> $GITHUB_OUTPUT
+              echo "slot=22:00" >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
             else
-              echo "mode=picks" >> $GITHUB_OUTPUT
+              echo "mode=sync" >> $GITHUB_OUTPUT
               echo "slot=manual" >> $GITHUB_OUTPUT
-              echo "date="      >> $GITHUB_OUTPUT
+              echo "date=" >> $GITHUB_OUTPUT
             fi
           else
             echo "mode=${{ inputs.mode }}" >> $GITHUB_OUTPUT
             echo "slot=${{ inputs.slot }}" >> $GITHUB_OUTPUT
             echo "date=${{ inputs.date }}" >> $GITHUB_OUTPUT
           fi
-
-      - name: Run Alert System
+      - name: Run
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python src/alert_runner.py \
-            --mode "${{ steps.decide.outputs.mode }}" \
-            --slot "${{ steps.decide.outputs.slot }}" \
-            --date "${{ steps.decide.outputs.date }}"
-
-      - name: Commit alert logs
+          python src/runner.py --mode "${{ steps.decide.outputs.mode }}" --slot "${{ steps.decide.outputs.slot }}" --date "${{ steps.decide.outputs.date }}"
+      - name: Commit updates (history + logs)
         run: |
-          git config user.name  "gitea-actions"
+          git config user.name "gitea-actions"
           git config user.email "gitea-actions@noreply.local"
-          mkdir -p data
-          git add -f data/alert_picks_log.csv || true
-          git add -f data/alert_performance_log.csv || true
-          git commit -m "Alert update (picks/perf logs)" || echo "No changes"
-          git pull --rebase origin main || git pull --rebase origin master
-          git push
+          git add data/*.xlsx data/*.csv || true
+          git commit -m "LN update (history/logs)" || echo "No changes"
+          git push --force
