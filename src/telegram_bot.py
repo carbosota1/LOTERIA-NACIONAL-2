@@ -1,5 +1,9 @@
 import os
+import time
 import requests
+
+# Reintentos ante fallos transitorios de red/DNS del runner
+_RETRY_WAITS = (2, 5, 10, 20)
 
 def send_telegram_message(text: str, token: str, chat_id: str, timeout: int = 30) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -9,8 +13,26 @@ def send_telegram_message(text: str, token: str, chat_id: str, timeout: int = 30
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    r = requests.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
+    last_err = None
+    for attempt in range(len(_RETRY_WAITS) + 1):
+        try:
+            r = requests.post(url, json=payload, timeout=timeout)
+            r.raise_for_status()
+            return
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_err = e
+            if attempt < len(_RETRY_WAITS):
+                time.sleep(_RETRY_WAITS[attempt])
+        except requests.HTTPError as e:
+            # 5xx / 429: reintentar; otros 4xx: error real, no reintentar
+            code = e.response.status_code if e.response is not None else 0
+            if code == 429 or code >= 500:
+                last_err = e
+                if attempt < len(_RETRY_WAITS):
+                    time.sleep(_RETRY_WAITS[attempt])
+                    continue
+            raise
+    raise last_err
 
 def get_telegram_creds(token_env="TELEGRAM_BOT_TOKEN", chat_env="TELEGRAM_CHAT_ID"):
     token = os.getenv(token_env, "").strip()
