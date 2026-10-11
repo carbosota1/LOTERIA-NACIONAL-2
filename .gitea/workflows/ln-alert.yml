@@ -33,7 +33,7 @@ jobs:
           token: ${{ secrets.GITEA_TOKEN }}
 
       - name: Install deps
-        run: pip install -r requirements.txt
+        run: pip install --retries 5 --timeout 30 -r requirements.txt
 
       - name: Decide job
         id: decide
@@ -79,6 +79,8 @@ jobs:
             --date "${{ steps.decide.outputs.date }}"
 
       - name: Commit alert logs
+        # always(): si Run falla (p. ej. Telegram sin red), igual se guardan los logs ya escritos
+        if: ${{ always() && steps.decide.conclusion == 'success' }}
         run: |
           git config user.name  "gitea-actions"
           git config user.email "gitea-actions@noreply.local"
