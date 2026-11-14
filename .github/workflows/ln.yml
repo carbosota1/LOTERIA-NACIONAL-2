@@ -2,9 +2,7 @@ name: LN System
 
 on:
   schedule:
-    - cron: "0 17 * * *"   # 1PM RD -> PICKS
-    - cron: "0 19 * * *"   # 3PM RD -> CHECK
-    - cron: "0 20 * * *"   # 4PM RD -> PICKS
+
     - cron: "0 2 * * *"    # 10PM RD -> SYNC (02:00 UTC)
   workflow_dispatch:
     inputs:
